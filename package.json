@@ -1,0 +1,12 @@
+{
+  "name": "bot-predictor-server",
+  "version": "1.0.0",
+  "description": "Serveur d'analyse et de predictions football",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}

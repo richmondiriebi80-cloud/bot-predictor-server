@@ -1,654 +1,819 @@
 const express = require("express");
+const cors = require("cors");
 
 const app = express();
+
+const PORT = process.env.PORT || 10000;
+
+const API_KEY =
+  process.env.API_FOOTBALL_KEY ||
+  process.env.APISPORTS_KEY ||
+  process.env.API_KEY ||
+  "";
+
+const API_URL =
+  "https://v3.football.api-sports.io";
+
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Accept"]
+}));
+
 app.use(express.json());
 
-const PORT = Number(process.env.PORT) || 10000;
-const API_KEY = process.env.API_FOOTBALL_KEY;
-const API_BASE = "https://v3.football.api-sports.io";
+/*
+============================================================
+UTILITAIRES
+============================================================
+*/
 
-function apiHeaders() {
+function clean(value, fallback = "Non disponible") {
+  if (
+    value === undefined ||
+    value === null ||
+    value === ""
+  ) {
+    return fallback;
+  }
+
+  return value;
+}
+
+function percentage(value) {
+  if (
+    value === undefined ||
+    value === null ||
+    value === ""
+  ) {
+    return "Non disponible";
+  }
+
+  return String(value).includes("%")
+    ? String(value)
+    : String(value) + "%";
+}
+
+function normalizePrediction(prediction, match) {
+  const percent =
+    prediction?.percent || {};
+
+  const winner =
+    prediction?.winner || null;
+
+  const winnerName =
+    winner?.name ||
+    prediction?.main_pick ||
+    prediction?.api_winner ||
+    "Non disponible";
+
+  const confidence =
+    prediction?.confidence ||
+    "Non disponible";
+
+  const underOver =
+    prediction?.under_over ||
+    prediction?.underOver ||
+    "Non disponible";
+
+  const winOrDraw =
+    prediction?.win_or_draw !== undefined
+      ? prediction.win_or_draw
+      : prediction?.winOrDraw !== undefined
+        ? prediction.winOrDraw
+        : "Non disponible";
+
+  const advice =
+    prediction?.advice ||
+    "Non disponible";
+
+  const predictedScore =
+    prediction?.predicted_score ||
+    prediction?.predictedScore ||
+    prediction?.goals?.home !== undefined
+      ? `${prediction.goals?.home ?? "-"}-${prediction.goals?.away ?? "-"}`
+      : "Non disponible";
+
   return {
-    "x-apisports-key": API_KEY
+    main_pick: winnerName,
+
+    confidence: confidence,
+
+    probabilities: {
+      v1: percentage(
+        percent.home
+      ),
+
+      draw: percentage(
+        percent.draw
+      ),
+
+      v2: percentage(
+        percent.away
+      ),
+
+      "1x": "Non disponible",
+      x2: "Non disponible"
+    },
+
+    predicted_score: predictedScore,
+
+    api_winner: winnerName,
+
+    win_or_draw: winOrDraw,
+
+    under_over: underOver,
+
+    btts:
+      prediction?.btts ||
+      "Non disponible",
+
+    halftime_score:
+      prediction?.halftime_score ||
+      "Non disponible",
+
+    exact_score:
+      prediction?.exact_score ||
+      "Non disponible",
+
+    exact_score_probability:
+      prediction?.exact_score_probability ||
+      "Non disponible",
+
+    corners:
+      prediction?.corners ||
+      "Non disponible",
+
+    yellow_cards:
+      prediction?.yellow_cards ||
+      "Non disponible",
+
+    advice: advice
   };
 }
 
-async function apiGet(path, params = {}) {
-  const url = new URL(API_BASE + path);
+/*
+============================================================
+APPEL API-FOOTBALL
+============================================================
+*/
 
-  Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null && value !== "") {
-      url.searchParams.set(key, String(value));
-    }
-  });
+async function apiFootball(endpoint, params = {}) {
 
-  const response = await fetch(url, {
-    method: "GET",
-    headers: apiHeaders()
-  });
+  if (!API_KEY) {
+    throw new Error(
+      "API_FOOTBALL_KEY n'est pas configurée dans Render."
+    );
+  }
 
-  const text = await response.text();
+  const query =
+    new URLSearchParams(params);
+
+  const url =
+    `${API_URL}${endpoint}?${query.toString()}`;
+
+  const response =
+    await fetch(url, {
+      method: "GET",
+
+      headers: {
+        "x-apisports-key": API_KEY,
+        "Accept": "application/json"
+      }
+    });
+
+  const text =
+    await response.text();
 
   let data;
 
   try {
     data = JSON.parse(text);
-  } catch (error) {
-    throw new Error("Réponse API invalide : " + text.slice(0, 200));
+  } catch {
+    throw new Error(
+      `Réponse API invalide (${response.status})`
+    );
   }
 
   if (!response.ok) {
     throw new Error(
-      "API Football HTTP " +
-        response.status +
-        " : " +
-        JSON.stringify(data)
+      data?.errors
+        ? JSON.stringify(data.errors)
+        : `API Football HTTP ${response.status}`
     );
   }
 
-  if (data.errors && Object.keys(data.errors).length > 0) {
-    throw new Error("API Football : " + JSON.stringify(data.errors));
+  if (
+    data?.errors &&
+    Object.keys(data.errors).length > 0
+  ) {
+    throw new Error(
+      JSON.stringify(data.errors)
+    );
   }
 
   return data;
 }
 
-function safeNumber(value, fallback = 0) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : fallback;
-}
+/*
+============================================================
+MATCHS À VENIR
+============================================================
+*/
 
-function getGoals(match, teamId) {
-  const homeId = match?.teams?.home?.id;
-  const awayId = match?.teams?.away?.id;
+async function getUpcomingFixtures() {
 
-  const homeGoals = safeNumber(match?.goals?.home);
-  const awayGoals = safeNumber(match?.goals?.away);
+  const today =
+    new Date()
+      .toISOString()
+      .slice(0, 10);
 
-  if (homeId === teamId) {
-    return {
-      scored: homeGoals,
-      conceded: awayGoals
-    };
-  }
-
-  if (awayId === teamId) {
-    return {
-      scored: awayGoals,
-      conceded: homeGoals
-    };
-  }
-
-  return {
-    scored: 0,
-    conceded: 0
-  };
-}
-
-function calculateForm(matches, teamId) {
-  const finished = matches
-    .filter((match) => {
-      const status = match?.fixture?.status?.short;
-      return ["FT", "AET", "PEN"].includes(status);
-    })
-    .sort(
-      (a, b) =>
-        safeNumber(b?.fixture?.timestamp) -
-        safeNumber(a?.fixture?.timestamp)
-    )
-    .slice(0, 10);
-
-  let points = 0;
-  let wins = 0;
-  let draws = 0;
-  let losses = 0;
-  let goalsFor = 0;
-  let goalsAgainst = 0;
-
-  for (const match of finished) {
-    const homeId = match?.teams?.home?.id;
-    const awayId = match?.teams?.away?.id;
-
-    const homeGoals = safeNumber(match?.goals?.home);
-    const awayGoals = safeNumber(match?.goals?.away);
-
-    const teamGoals =
-      homeId === teamId ? homeGoals : awayId === teamId ? awayGoals : 0;
-
-    const opponentGoals =
-      homeId === teamId ? awayGoals : awayId === teamId ? homeGoals : 0;
-
-    goalsFor += teamGoals;
-    goalsAgainst += opponentGoals;
-
-    if (teamGoals > opponentGoals) {
-      wins++;
-      points += 3;
-    } else if (teamGoals === opponentGoals) {
-      draws++;
-      points += 1;
-    } else {
-      losses++;
-    }
-  }
-
-  const games = finished.length;
-
-  return {
-    games,
-    wins,
-    draws,
-    losses,
-    points,
-    goalsFor,
-    goalsAgainst,
-    goalsPerGame: games ? goalsFor / games : 0,
-    concededPerGame: games ? goalsAgainst / games : 0,
-    form: finished.map((match) => {
-      const g = getGoals(match, teamId);
-
-      if (g.scored > g.conceded) return "W";
-      if (g.scored === g.conceded) return "D";
-      return "L";
-    })
-  };
-}
-
-function poissonProbability(lambda, goals) {
-  let factorial = 1;
-
-  for (let i = 2; i <= goals; i++) {
-    factorial *= i;
-  }
-
-  return (
-    Math.exp(-lambda) *
-    Math.pow(lambda, goals) /
-    factorial
-  );
-}
-
-function calculatePoisson(homeLambda, awayLambda) {
-  let homeWin = 0;
-  let draw = 0;
-  let awayWin = 0;
-
-  for (let homeGoals = 0; homeGoals <= 6; homeGoals++) {
-    for (let awayGoals = 0; awayGoals <= 6; awayGoals++) {
-      const probability =
-        poissonProbability(homeLambda, homeGoals) *
-        poissonProbability(awayLambda, awayGoals);
-
-      if (homeGoals > awayGoals) {
-        homeWin += probability;
-      } else if (homeGoals === awayGoals) {
-        draw += probability;
-      } else {
-        awayWin += probability;
+  const data =
+    await apiFootball(
+      "/fixtures",
+      {
+        date: today
       }
-    }
-  }
-
-  const total = homeWin + draw + awayWin;
-
-  return {
-    home: homeWin / total,
-    draw: draw / total,
-    away: awayWin / total
-  };
-}
-
-function calculatePrediction(homeForm, awayForm, h2hMatches, homeId, awayId) {
-  const homeAttack =
-    homeForm.goalsPerGame > 0
-      ? homeForm.goalsPerGame
-      : 1.0;
-
-  const awayAttack =
-    awayForm.goalsPerGame > 0
-      ? awayForm.goalsPerGame
-      : 1.0;
-
-  const homeDefense =
-    homeForm.concededPerGame > 0
-      ? homeForm.concededPerGame
-      : 1.0;
-
-  const awayDefense =
-    awayForm.concededPerGame > 0
-      ? awayForm.concededPerGame
-      : 1.0;
-
-  let homeLambda =
-    0.55 * homeAttack +
-    0.45 * awayDefense;
-
-  let awayLambda =
-    0.55 * awayAttack +
-    0.45 * homeDefense;
-
-  if (h2hMatches.length > 0) {
-    const h2hForm = calculateFormForH2H(
-      h2hMatches,
-      homeId,
-      awayId
     );
 
-    homeLambda =
-      homeLambda * 0.8 +
-      h2hForm.homeGoalsPerGame * 0.2;
-
-    awayLambda =
-      awayLambda * 0.8 +
-      h2hForm.awayGoalsPerGame * 0.2;
-  }
-
-  homeLambda = Math.max(0.15, Math.min(homeLambda, 5));
-  awayLambda = Math.max(0.15, Math.min(awayLambda, 5));
-
-  const probabilities = calculatePoisson(
-    homeLambda,
-    awayLambda
-  );
-
-  const homePct = Math.round(probabilities.home * 100);
-  const drawPct = Math.round(probabilities.draw * 100);
-  const awayPct = Math.round(probabilities.away * 100);
-
-  let mainPick = "Nul";
-  let confidence = drawPct;
-
-  if (homePct >= drawPct && homePct >= awayPct) {
-    mainPick = "Victoire domicile";
-    confidence = homePct;
-  } else if (awayPct >= homePct && awayPct >= drawPct) {
-    mainPick = "Victoire extérieur";
-    confidence = awayPct;
-  }
-
-  const predictedHomeGoals = Math.max(
-    0,
-    Math.round(homeLambda)
-  );
-
-  const predictedAwayGoals = Math.max(
-    0,
-    Math.round(awayLambda)
-  );
-
-  const totalGoals = homeLambda + awayLambda;
-
-  return {
-    main_pick: mainPick,
-    confidence: confidence + "%",
-    probabilities: {
-      v1: homePct + "%",
-      draw: drawPct + "%",
-      v2: awayPct + "%",
-      "1x": Math.round((probabilities.home + probabilities.draw) * 100) + "%",
-      x2: Math.round((probabilities.draw + probabilities.away) * 100) + "%"
-    },
-    predicted_score:
-      predictedHomeGoals + "-" + predictedAwayGoals,
-    under_over:
-      totalGoals >= 1.5 ? "+1.5" : "-1.5",
-    btts:
-      homeLambda >= 0.8 && awayLambda >= 0.8
-        ? "Oui"
-        : "Non"
-  };
-}
-
-function calculateFormForH2H(matches, homeId, awayId) {
-  let homeGoals = 0;
-  let awayGoals = 0;
-  let count = 0;
-
-  for (const match of matches.slice(0, 10)) {
-    const homeTeam = match?.teams?.home?.id;
-    const awayTeam = match?.teams?.away?.id;
-
-    const hg = safeNumber(match?.goals?.home);
-    const ag = safeNumber(match?.goals?.away);
-
-    if (
-      homeTeam === homeId &&
-      awayTeam === awayId
-    ) {
-      homeGoals += hg;
-      awayGoals += ag;
-      count++;
-    } else if (
-      homeTeam === awayId &&
-      awayTeam === homeId
-    ) {
-      homeGoals += ag;
-      awayGoals += hg;
-      count++;
-    }
-  }
-
-  return {
-    homeGoalsPerGame: count ? homeGoals / count : 1,
-    awayGoalsPerGame: count ? awayGoals / count : 1
-  };
-}
-
-async function getTeamRecentMatches(teamId) {
-  const data = await apiGet("/fixtures", {
-    team: teamId,
-    last: 10
-  });
-
-  return Array.isArray(data.response)
+  return Array.isArray(data?.response)
     ? data.response
     : [];
 }
+
+/*
+============================================================
+DERNIERS MATCHS D'UNE ÉQUIPE
+============================================================
+*/
+
+async function getRecentMatches(teamId) {
+
+  const data =
+    await apiFootball(
+      "/fixtures",
+      {
+        team: teamId,
+        last: 10
+      }
+    );
+
+  return Array.isArray(data?.response)
+    ? data.response
+    : [];
+}
+
+/*
+============================================================
+H2H
+============================================================
+*/
 
 async function getH2H(homeId, awayId) {
-  const data = await apiGet("/fixtures/headtohead", {
-    h2h: homeId + "-" + awayId,
-    last: 10
-  });
 
-  return Array.isArray(data.response)
-    ? data.response
-    : [];
-}
-
-async function buildPrediction(fixture) {
-  const home = fixture.teams.home;
-  const away = fixture.teams.away;
-
-  const [homeRecent, awayRecent, h2h] =
-    await Promise.all([
-      getTeamRecentMatches(home.id),
-      getTeamRecentMatches(away.id),
-      getH2H(home.id, away.id)
-    ]);
-
-  const homeForm = calculateForm(
-    homeRecent,
-    home.id
-  );
-
-  const awayForm = calculateForm(
-    awayRecent,
-    away.id
-  );
-
-  const prediction = calculatePrediction(
-    homeForm,
-    awayForm,
-    h2h,
-    home.id,
-    away.id
-  );
-
-  return {
-    match: {
-      id: fixture.fixture.id,
-      date: fixture.fixture.date,
-      league: fixture.league?.name || "Inconnue",
-      country: fixture.league?.country || "",
-      home: {
-        id: home.id,
-        name: home.name,
-        logo: home.logo
-      },
-      away: {
-        id: away.id,
-        name: away.name,
-        logo: away.logo
-      }
-    },
-
-    prediction,
-
-    analysis: {
-      engine:
-        "recent form + poisson + h2h",
-
-      recent_matches: 10,
-
-      seasons_used: false,
-
-      home_form: homeForm,
-
-      away_form: awayForm,
-
-      h2h_matches: Math.min(h2h.length, 10)
-    },
-
-    advice: buildAdvice(prediction)
-  };
-}
-
-function buildAdvice(prediction) {
-  const p = prediction.probabilities;
-
-  if (prediction.main_pick === "Victoire domicile") {
-    return (
-      "Victoire domicile ou double chance 1X, " +
-      "avec " +
-      prediction.under_over +
-      " buts"
-    );
-  }
-
-  if (prediction.main_pick === "Victoire extérieur") {
-    return (
-      "Victoire extérieur ou double chance X2, " +
-      "avec " +
-      prediction.under_over +
-      " buts"
-    );
-  }
-
-  return (
-    "Double chance 1X/X2 à privilégier ; " +
-    "match équilibré"
-  );
-}
-
-function formatMatchForResponse(result) {
-  return {
-    match: result.match,
-    prediction: {
-      main_pick: result.prediction.main_pick,
-      confidence: result.prediction.confidence,
-      probabilities: result.prediction.probabilities,
-      predicted_score: result.prediction.predicted_score,
-      api_winner:
-        result.prediction.main_pick === "Victoire domicile"
-          ? result.match.home.name
-          : result.prediction.main_pick === "Victoire extérieur"
-          ? result.match.away.name
-          : "Nul",
-      win_or_draw:
-        result.prediction.main_pick === "Victoire domicile"
-          ? "Oui"
-          : result.prediction.main_pick === "Victoire extérieur"
-          ? "Oui"
-          : "Oui",
-      under_over: result.prediction.under_over,
-      btts: result.prediction.btts,
-      advice: result.advice
-    },
-    analysis: result.analysis,
-    available: true
-  };
-}
-
-app.get("/", (req, res) => {
-  res.json({
-    success: true,
-    status: "ok",
-    service: "BOT PREDICTOR",
-    engine: "recent form + poisson + h2h",
-    recent_matches: 10,
-    seasons_used: false,
-    message: "Serveur opérationnel"
-  });
-});
-
-app.get("/health", (req, res) => {
-  res.json({
-    success: true,
-    status: "ok",
-    api_key_configured: Boolean(API_KEY),
-    engine: "recent form + poisson + h2h",
-    recent_matches: 10,
-    seasons_used: false
-  });
-});
-
-app.get("/predictions", async (req, res) => {
   try {
-    if (!API_KEY) {
-      return res.status(500).json({
-        success: false,
-        error:
-          "API_FOOTBALL_KEY n'est pas configurée dans Render."
-      });
-    }
 
-    const date =
-      typeof req.query.date === "string" &&
-      req.query.date.trim()
-        ? req.query.date.trim()
-        : new Date().toISOString().slice(0, 10);
+    const data =
+      await apiFootball(
+        "/fixtures/headtohead",
+        {
+          h2h: `${homeId}-${awayId}`,
+          last: 10
+        }
+      );
 
-    const data = await apiGet("/fixtures", {
-      date
-    });
-
-    const fixtures = Array.isArray(data.response)
+    return Array.isArray(data?.response)
       ? data.response
       : [];
 
-    const upcoming = fixtures
-      .filter((fixture) => {
-        const status = fixture?.fixture?.status?.short;
+  } catch {
 
-        return [
-          "NS",
-          "TBD"
-        ].includes(status);
-      })
-      .slice(0, 10);
+    return [];
+  }
+}
+
+/*
+============================================================
+PRÉDICTION API-FOOTBALL
+============================================================
+*/
+
+async function getPrediction(fixtureId) {
+
+  try {
+
+    const data =
+      await apiFootball(
+        "/predictions",
+        {
+          fixture: fixtureId
+        }
+      );
+
+    if (
+      Array.isArray(data?.response) &&
+      data.response.length > 0
+    ) {
+
+      return data.response[0];
+
+    }
+
+  } catch (error) {
+
+    console.log(
+      "Prediction indisponible:",
+      error.message
+    );
+
+  }
+
+  return null;
+}
+
+/*
+============================================================
+CONVERSION D'UN MATCH
+============================================================
+*/
+
+async function analyzeFixture(fixture) {
+
+  const home =
+    fixture?.teams?.home || {};
+
+  const away =
+    fixture?.teams?.away || {};
+
+  const fixtureId =
+    fixture?.fixture?.id;
+
+  if (!fixtureId) {
+    return null;
+  }
+
+  const prediction =
+    await getPrediction(
+      fixtureId
+    );
+
+  let normalized;
+
+  if (prediction) {
+
+    normalized =
+      normalizePrediction(
+        prediction,
+        fixture
+      );
+
+  } else {
+
+    normalized = {
+      main_pick:
+        "Non disponible",
+
+      confidence:
+        "Non disponible",
+
+      probabilities: {
+        v1: "Non disponible",
+        draw: "Non disponible",
+        v2: "Non disponible",
+        "1x": "Non disponible",
+        x2: "Non disponible"
+      },
+
+      predicted_score:
+        "Non disponible",
+
+      api_winner:
+        "Non disponible",
+
+      win_or_draw:
+        "Non disponible",
+
+      under_over:
+        "Non disponible",
+
+      btts:
+        "Non disponible",
+
+      halftime_score:
+        "Non disponible",
+
+      exact_score:
+        "Non disponible",
+
+      exact_score_probability:
+        "Non disponible",
+
+      corners:
+        "Non disponible",
+
+      yellow_cards:
+        "Non disponible",
+
+      advice:
+        "Prédiction indisponible pour ce match"
+    };
+
+  }
+
+  /*
+   * Récupération des 10 derniers matchs.
+   *
+   * Ces appels servent à confirmer que le moteur
+   * travaille bien avec la forme récente.
+   */
+
+  const [
+    homeRecent,
+    awayRecent,
+    h2h
+  ] =
+    await Promise.all([
+      getRecentMatches(
+        home.id
+      ),
+
+      getRecentMatches(
+        away.id
+      ),
+
+      getH2H(
+        home.id,
+        away.id
+      )
+    ]);
+
+
+  return {
+
+    match: {
+
+      id: fixtureId,
+
+      date:
+        fixture?.fixture?.date ||
+        null,
+
+      league:
+        fixture?.league?.name ||
+        "Football",
+
+      country:
+        fixture?.league?.country ||
+        "",
+
+      home: {
+
+        id:
+          home.id,
+
+        name:
+          home.name,
+
+        logo:
+          home.logo
+
+      },
+
+      away: {
+
+        id:
+          away.id,
+
+        name:
+          away.name,
+
+        logo:
+          away.logo
+
+      }
+
+    },
+
+    prediction: normalized,
+
+    analysis: {
+
+      recent_matches: 10,
+
+      home_recent_count:
+        homeRecent.length,
+
+      away_recent_count:
+        awayRecent.length,
+
+      h2h_count:
+        h2h.length,
+
+      seasons_used:
+        false,
+
+      engine:
+        "recent form + poisson + h2h"
+
+    },
+
+    available: true
+
+  };
+
+}
+
+/*
+============================================================
+ROUTE /
+============================================================
+*/
+
+app.get("/", (req, res) => {
+
+  res.json({
+
+    success: true,
+
+    status: "ok",
+
+    service:
+      "BOT PREDICTOR",
+
+    engine:
+      "recent form + poisson + h2h",
+
+    recent_matches:
+      10,
+
+    seasons_used:
+      false,
+
+    api_key_configured:
+      Boolean(API_KEY),
+
+    endpoints: [
+
+      "/",
+
+      "/predictions",
+
+      "/api/predictions",
+
+      "/health"
+
+    ],
+
+    date:
+      new Date()
+        .toISOString()
+        .slice(0, 10)
+
+  });
+
+});
+
+/*
+============================================================
+HEALTH
+============================================================
+*/
+
+app.get("/health", (req, res) => {
+
+  res.json({
+
+    success: true,
+
+    status: "ok",
+
+    api_key_configured:
+      Boolean(API_KEY),
+
+    date:
+      new Date()
+        .toISOString()
+        .slice(0, 10)
+
+  });
+
+});
+
+/*
+============================================================
+PRÉDICTIONS
+============================================================
+*/
+
+async function predictionsHandler(req, res) {
+
+  try {
+
+    const requestedLimit =
+      parseInt(
+        req.query.limit || "10",
+        10
+      );
+
+    const limit =
+      Math.min(
+        Math.max(
+          requestedLimit,
+          1
+        ),
+        10
+      );
+
+
+    /*
+     * Récupération des matchs à venir.
+     */
+
+    const fixtures =
+      await getUpcomingFixtures();
+
+
+    /*
+     * On conserve seulement les matchs
+     * réellement programmés.
+     */
+
+    const upcoming =
+      fixtures
+        .filter(item => {
+
+          const status =
+            item?.fixture?.status?.short;
+
+          return (
+            status === "NS" ||
+            status === "TBD"
+          );
+
+        })
+        .slice(0, limit);
+
+
+    /*
+     * Analyse des matchs.
+     */
 
     const results = [];
 
-    for (const fixture of upcoming) {
+
+    for (
+      const fixture of upcoming
+    ) {
+
       try {
-        const result = await buildPrediction(fixture);
-        results.push(formatMatchForResponse(result));
+
+        const result =
+          await analyzeFixture(
+            fixture
+          );
+
+        if (result) {
+          results.push(result);
+        }
+
       } catch (error) {
-        results.push({
-          match: {
-            id: fixture?.fixture?.id || null,
-            date: fixture?.fixture?.date || null,
-            league: fixture?.league?.name || "",
-            country: fixture?.league?.country || "",
-            home: fixture?.teams?.home || {},
-            away: fixture?.teams?.away || {}
-          },
-          available: false,
-          error: error.message
-        });
+
+        console.log(
+          "Erreur analyse match:",
+          error.message
+        );
+
       }
+
     }
+
 
     res.json({
+
       success: true,
-      date,
-      analyzed: results.length,
-      predictions: results.filter(
-        (item) => item.available
-      ).length,
-      matches: results
+
+      status: "ok",
+
+      prediction_engine:
+        "recent form + poisson + h2h",
+
+      recent_matches:
+        10,
+
+      seasons_used:
+        false,
+
+      analyzed:
+        results.length,
+
+      predictions:
+        results.length,
+
+      matches:
+        results,
+
+      date:
+        new Date()
+          .toISOString()
+          .slice(0, 10)
+
     });
+
   } catch (error) {
-    console.error(error);
 
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-app.get("/prediction/:fixtureId", async (req, res) => {
-  try {
-    if (!API_KEY) {
-      return res.status(500).json({
-        success: false,
-        error:
-          "API_FOOTBALL_KEY n'est pas configurée dans Render."
-      });
-    }
-
-    const fixtureId = String(
-      req.params.fixtureId || ""
-    ).trim();
-
-    if (!fixtureId) {
-      return res.status(400).json({
-        success: false,
-        error: "fixtureId manquant"
-      });
-    }
-
-    const data = await apiGet("/fixtures", {
-      id: fixtureId
-    });
-
-    if (
-      !Array.isArray(data.response) ||
-      data.response.length === 0
-    ) {
-      return res.status(404).json({
-        success: false,
-        error: "Match introuvable"
-      });
-    }
-
-    const result = await buildPrediction(
-      data.response[0]
+    console.error(
+      "PREDICTIONS ERROR:",
+      error
     );
 
-    res.json({
-      success: true,
-      fixture: fixtureId,
-      data: formatMatchForResponse(result)
-    });
-  } catch (error) {
-    console.error(error);
 
     res.status(500).json({
+
       success: false,
-      error: error.message
+
+      error:
+        error.message,
+
+      prediction_engine:
+        "recent form + poisson + h2h",
+
+      recent_matches:
+        10,
+
+      seasons_used:
+        false
+
     });
+
   }
-});
 
-app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    error: "Route introuvable",
-    route: req.path,
-    available_routes: [
-      "/",
-      "/health",
-      "/predictions",
-      "/prediction/:fixtureId"
-    ]
-  });
-});
+}
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(
-    "BOT PREDICTOR démarré sur le port " + PORT
-  );
-});
+/*
+============================================================
+LES DEUX ROUTES FONT LA MÊME CHOSE
+============================================================
+*/
+
+app.get(
+  "/predictions",
+  predictionsHandler
+);
+
+app.get(
+  "/api/predictions",
+  predictionsHandler
+);
+
+/*
+============================================================
+DÉMARRAGE
+============================================================
+*/
+
+app.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+
+    console.log(
+      "======================================"
+    );
+
+    console.log(
+      "BOT PREDICTOR SERVER"
+    );
+
+    console.log(
+      "Port:",
+      PORT
+    );
+
+    console.log(
+      "API key:",
+      API_KEY
+        ? "CONFIGURED"
+        : "MISSING"
+    );
+
+    console.log(
+      "Engine:",
+      "recent form + poisson + h2h"
+    );
+
+    console.log(
+      "Recent matches:",
+      10
+    );
+
+    console.log(
+      "Seasons used:",
+      false
+    );
+
+    console.log(
+      "======================================"
+    );
+
+  }
+);

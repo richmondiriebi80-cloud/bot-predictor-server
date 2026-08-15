@@ -1,12 +1,17 @@
 {
   "name": "bot-predictor-server",
-  "version": "1.0.0",
-  "description": "Serveur d'analyse et de predictions football",
+  "version": "2.0.0",
+  "description": "BOT PREDICTOR - API Football et FIFA virtuel",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "build": "npx playwright install chromium"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "playwright": "^1.55.0"
   }
 }

@@ -10,7 +10,7 @@ const API_URL = "https://v3.football.api-sports.io";
 const cache = new Map();
 const CACHE_TIME = 5 * 60 * 1000;
 
-function headers() {
+function apiHeaders() {
   return {
     "x-apisports-key": API_KEY,
     "Accept": "application/json"
@@ -19,19 +19,17 @@ function headers() {
 
 async function apiGet(endpoint) {
   if (!API_KEY) {
-    throw new Error("API_FOOTBALL_KEY n'est pas configurée");
+    throw new Error("API_FOOTBALL_KEY non configurée");
   }
 
-  const now = Date.now();
   const cached = cache.get(endpoint);
 
-  if (cached && now - cached.time < CACHE_TIME) {
+  if (cached && Date.now() - cached.time < CACHE_TIME) {
     return cached.data;
   }
 
   const response = await fetch(API_URL + endpoint, {
-    method: "GET",
-    headers: headers()
+    headers: apiHeaders()
   });
 
   const text = await response.text();
@@ -42,7 +40,7 @@ async function apiGet(endpoint) {
     data = JSON.parse(text);
   } catch {
     throw new Error(
-      "Réponse API non JSON. HTTP " + response.status
+      "Réponse API non JSON : HTTP " + response.status
     );
   }
 
@@ -50,41 +48,36 @@ async function apiGet(endpoint) {
     throw new Error(
       "API-Football HTTP " +
       response.status +
-      ": " +
+      " : " +
       JSON.stringify(data)
     );
   }
 
   if (
     data.errors &&
-    typeof data.errors === "object" &&
     Object.keys(data.errors).length > 0
   ) {
     throw new Error(JSON.stringify(data.errors));
   }
 
   cache.set(endpoint, {
-    time: now,
-    data: data
+    time: Date.now(),
+    data
   });
 
   return data;
+}
+
+function num(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
-function number(value, fallback = 0) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function pct(value) {
-  if (!Number.isFinite(value)) {
-    return "Non disponible";
-  }
-
+function percent(value) {
   return Math.round(clamp(value, 0, 100)) + "%";
 }
 
@@ -93,172 +86,18 @@ function today() {
 }
 
 /*
-==================================================
-POISSON
-==================================================
+====================================================
+10 DERNIERS MATCHS
+IMPORTANT :
+AUCUN PARAMETRE season
+====================================================
 */
 
-function factorial(n) {
-  if (n <= 1) return 1;
-
-  let result = 1;
-
-  for (let i = 2; i <= n; i++) {
-    result *= i;
-  }
-
-  return result;
-}
-
-function poisson(lambda, goals) {
-  if (lambda <= 0) {
-    return goals === 0 ? 1 : 0;
-  }
-
-  return (
-    Math.exp(-lambda) *
-    Math.pow(lambda, goals) /
-    factorial(goals)
-  );
-}
-
-/*
-==================================================
-MATRICE DES SCORES
-==================================================
-*/
-
-function scoreMatrix(homeExpected, awayExpected) {
-  const matrix = [];
-
-  for (let home = 0; home <= 8; home++) {
-    matrix[home] = [];
-
-    for (let away = 0; away <= 8; away++) {
-      matrix[home][away] =
-        poisson(homeExpected, home) *
-        poisson(awayExpected, away);
-    }
-  }
-
-  return matrix;
-}
-
-function probabilitiesFromMatrix(matrix) {
-  let homeWin = 0;
-  let draw = 0;
-  let awayWin = 0;
-
-  let over15 = 0;
-  let over25 = 0;
-  let over35 = 0;
-
-  let btts = 0;
-
-  let total = 0;
-
-  for (let h = 0; h < matrix.length; h++) {
-    for (let a = 0; a < matrix[h].length; a++) {
-      const p = matrix[h][a];
-
-      total += p;
-
-      if (h > a) homeWin += p;
-      if (h === a) draw += p;
-      if (h < a) awayWin += p;
-
-      if (h + a >= 2) over15 += p;
-      if (h + a >= 3) over25 += p;
-      if (h + a >= 4) over35 += p;
-
-      if (h > 0 && a > 0) {
-        btts += p;
-      }
-    }
-  }
-
-  if (total > 0) {
-    homeWin /= total;
-    draw /= total;
-    awayWin /= total;
-    over15 /= total;
-    over25 /= total;
-    over35 /= total;
-    btts /= total;
-  }
-
-  return {
-    homeWin: homeWin * 100,
-    draw: draw * 100,
-    awayWin: awayWin * 100,
-    over15: over15 * 100,
-    over25: over25 * 100,
-    over35: over35 * 100,
-    btts: btts * 100
-  };
-}
-
-/*
-==================================================
-STATISTIQUES ÉQUIPE
-==================================================
-*/
-
-function extractGoals(fixture, teamId) {
-  const goals = fixture.goals || {};
-
-  const homeId =
-    fixture.teams &&
-    fixture.teams.home
-      ? fixture.teams.home.id
-      : null;
-
-  const awayId =
-    fixture.teams &&
-    fixture.teams.away
-      ? fixture.teams.away.id
-      : null;
-
-  const isHome = homeId === teamId;
-  const isAway = awayId === teamId;
-
-  if (!isHome && !isAway) {
-    return null;
-  }
-
-  const gf = isHome
-    ? number(goals.home, 0)
-    : number(goals.away, 0);
-
-  const ga = isHome
-    ? number(goals.away, 0)
-    : number(goals.home, 0);
-
-  return {
-    gf: gf,
-    ga: ga,
-    home: isHome,
-    away: isAway
-  };
-}
-
-async function getRecentMatches(teamId, leagueId = null, season = null) {
-  let endpoint =
+async function getLastMatches(teamId) {
+  const endpoint =
     "/fixtures?team=" +
     encodeURIComponent(teamId) +
     "&last=10";
-
-  if (leagueId) {
-    endpoint +=
-      "&league=" +
-      encodeURIComponent(leagueId);
-  }
-
-  if (season) {
-    endpoint +=
-      "&season=" +
-      encodeURIComponent(season);
-  }
 
   const data = await apiGet(endpoint);
 
@@ -267,7 +106,13 @@ async function getRecentMatches(teamId, leagueId = null, season = null) {
     : [];
 }
 
-function calculateTeamStats(matches, teamId) {
+/*
+====================================================
+STATISTIQUES DES 10 DERNIERS MATCHS
+====================================================
+*/
+
+function getTeamStats(matches, teamId) {
   let played = 0;
   let wins = 0;
   let draws = 0;
@@ -277,19 +122,19 @@ function calculateTeamStats(matches, teamId) {
   let goalsAgainst = 0;
 
   let homePlayed = 0;
-  let homeGoalsFor = 0;
-  let homeGoalsAgainst = 0;
+  let homeGF = 0;
+  let homeGA = 0;
 
   let awayPlayed = 0;
-  let awayGoalsFor = 0;
-  let awayGoalsAgainst = 0;
+  let awayGF = 0;
+  let awayGA = 0;
 
-  for (const fixture of matches) {
+  for (const match of matches) {
     const status =
-      fixture.fixture &&
-      fixture.fixture.status
-        ? fixture.fixture.status.short
-        : null;
+      match.fixture &&
+      match.fixture.status
+        ? match.fixture.status.short
+        : "";
 
     if (
       status !== "FT" &&
@@ -299,34 +144,54 @@ function calculateTeamStats(matches, teamId) {
       continue;
     }
 
-    const result =
-      extractGoals(fixture, teamId);
+    const homeTeam =
+      match.teams &&
+      match.teams.home;
 
-    if (!result) continue;
+    const awayTeam =
+      match.teams &&
+      match.teams.away;
+
+    const goals =
+      match.goals || {};
+
+    if (!homeTeam || !awayTeam) continue;
+
+    const isHome =
+      homeTeam.id === teamId;
+
+    const isAway =
+      awayTeam.id === teamId;
+
+    if (!isHome && !isAway) continue;
+
+    const gf = isHome
+      ? num(goals.home)
+      : num(goals.away);
+
+    const ga = isHome
+      ? num(goals.away)
+      : num(goals.home);
 
     played++;
 
-    goalsFor += result.gf;
-    goalsAgainst += result.ga;
+    goalsFor += gf;
+    goalsAgainst += ga;
 
-    if (result.gf > result.ga) {
-      wins++;
-    } else if (result.gf === result.ga) {
-      draws++;
-    } else {
-      losses++;
-    }
+    if (gf > ga) wins++;
+    else if (gf === ga) draws++;
+    else losses++;
 
-    if (result.home) {
+    if (isHome) {
       homePlayed++;
-      homeGoalsFor += result.gf;
-      homeGoalsAgainst += result.ga;
+      homeGF += gf;
+      homeGA += ga;
     }
 
-    if (result.away) {
+    if (isAway) {
       awayPlayed++;
-      awayGoalsFor += result.gf;
-      awayGoalsAgainst += result.ga;
+      awayGF += gf;
+      awayGA += ga;
     }
   }
 
@@ -341,16 +206,6 @@ function calculateTeamStats(matches, teamId) {
         ? wins / played
         : 0,
 
-    drawRate:
-      played > 0
-        ? draws / played
-        : 0,
-
-    lossRate:
-      played > 0
-        ? losses / played
-        : 0,
-
     goalsForAvg:
       played > 0
         ? goalsFor / played
@@ -363,30 +218,30 @@ function calculateTeamStats(matches, teamId) {
 
     homeGoalsForAvg:
       homePlayed > 0
-        ? homeGoalsFor / homePlayed
-        : 1.2,
+        ? homeGF / homePlayed
+        : goalsFor / Math.max(played, 1),
 
     homeGoalsAgainstAvg:
       homePlayed > 0
-        ? homeGoalsAgainst / homePlayed
-        : 1,
+        ? homeGA / homePlayed
+        : goalsAgainst / Math.max(played, 1),
 
     awayGoalsForAvg:
       awayPlayed > 0
-        ? awayGoalsFor / awayPlayed
-        : 1,
+        ? awayGF / awayPlayed
+        : goalsFor / Math.max(played, 1),
 
     awayGoalsAgainstAvg:
       awayPlayed > 0
-        ? awayGoalsAgainst / awayPlayed
-        : 1
+        ? awayGA / awayPlayed
+        : goalsAgainst / Math.max(played, 1)
   };
 }
 
 /*
-==================================================
+====================================================
 H2H
-==================================================
+====================================================
 */
 
 async function getH2H(homeId, awayId) {
@@ -403,31 +258,28 @@ async function getH2H(homeId, awayId) {
     return Array.isArray(data.response)
       ? data.response
       : [];
-  } catch {
+  } catch (error) {
+    console.log(
+      "H2H indisponible :",
+      error.message
+    );
+
     return [];
   }
 }
 
-function h2hFactor(matches, homeId) {
-  if (!matches || matches.length === 0) {
-    return {
-      home: 0,
-      away: 0,
-      draw: 0
-    };
-  }
-
+function calculateH2H(matches, homeId) {
   let homeWins = 0;
-  let awayWins = 0;
   let draws = 0;
-  let count = 0;
+  let awayWins = 0;
+  let total = 0;
 
   for (const match of matches) {
     const status =
       match.fixture &&
       match.fixture.status
         ? match.fixture.status.short
-        : null;
+        : "";
 
     if (
       status !== "FT" &&
@@ -437,45 +289,39 @@ function h2hFactor(matches, homeId) {
       continue;
     }
 
-    const homeGoals =
+    const gh =
       match.goals &&
-      match.goals.home !== null
-        ? number(match.goals.home)
+      match.goals.home != null
+        ? num(match.goals.home)
         : null;
 
-    const awayGoals =
+    const ga =
       match.goals &&
-      match.goals.away !== null
-        ? number(match.goals.away)
+      match.goals.away != null
+        ? num(match.goals.away)
         : null;
 
-    if (
-      homeGoals === null ||
-      awayGoals === null
-    ) {
+    if (gh === null || ga === null) {
       continue;
     }
 
-    const matchHomeId =
+    const actualHomeId =
       match.teams &&
       match.teams.home
         ? match.teams.home.id
         : null;
 
-    const actualHomeIsRequested =
-      matchHomeId === homeId;
-
     const requestedHomeGoals =
-      actualHomeIsRequested
-        ? homeGoals
-        : awayGoals;
+      actualHomeId === homeId
+        ? gh
+        : ga;
 
     const requestedAwayGoals =
-      actualHomeIsRequested
-        ? awayGoals
-        : homeGoals;
+      actualHomeId === homeId
+        ? ga
+        : gh;
 
-    count++;
+    total++;
 
     if (
       requestedHomeGoals >
@@ -492,68 +338,187 @@ function h2hFactor(matches, homeId) {
     }
   }
 
-  if (count === 0) {
+  if (total === 0) {
     return {
       home: 0,
-      away: 0,
-      draw: 0
+      draw: 0,
+      away: 0
     };
   }
 
   return {
-    home: homeWins / count,
-    away: awayWins / count,
-    draw: draws / count
+    home: homeWins / total,
+    draw: draws / total,
+    away: awayWins / total
   };
 }
 
 /*
-==================================================
-MOTEUR DE PRÉDICTION
-==================================================
+====================================================
+POISSON
+====================================================
 */
 
-function calculateExpectedGoals(
-  homeStats,
-  awayStats
-) {
-  /*
-   * Attaque domicile + défense extérieure
-   */
-  const homeAttack =
-    homeStats.homeGoalsForAvg;
+function factorial(n) {
+  let result = 1;
 
-  const awayDefense =
-    awayStats.awayGoalsAgainstAvg;
+  for (let i = 2; i <= n; i++) {
+    result *= i;
+  }
 
-  /*
-   * Attaque extérieure + défense domicile
-   */
-  const awayAttack =
-    awayStats.awayGoalsForAvg;
+  return result;
+}
 
-  const homeDefense =
-    homeStats.homeGoalsAgainstAvg;
+function poisson(lambda, goals) {
+  return (
+    Math.exp(-lambda) *
+    Math.pow(lambda, goals) /
+    factorial(goals)
+  );
+}
 
+function createScoreMatrix(homeExpected, awayExpected) {
+  const matrix = [];
+
+  for (let h = 0; h <= 8; h++) {
+    matrix[h] = [];
+
+    for (let a = 0; a <= 8; a++) {
+      matrix[h][a] =
+        poisson(homeExpected, h) *
+        poisson(awayExpected, a);
+    }
+  }
+
+  return matrix;
+}
+
+/*
+====================================================
+PROBABILITÉS
+====================================================
+*/
+
+function calculateProbabilities(matrix) {
+  let homeWin = 0;
+  let draw = 0;
+  let awayWin = 0;
+
+  let over15 = 0;
+  let over25 = 0;
+  let under25 = 0;
+
+  let btts = 0;
+  let total = 0;
+
+  for (let h = 0; h < matrix.length; h++) {
+    for (let a = 0; a < matrix[h].length; a++) {
+      const p = matrix[h][a];
+
+      total += p;
+
+      if (h > a) homeWin += p;
+      if (h === a) draw += p;
+      if (h < a) awayWin += p;
+
+      if (h + a >= 2) over15 += p;
+      if (h + a >= 3) over25 += p;
+      if (h + a < 3) under25 += p;
+
+      if (h > 0 && a > 0) {
+        btts += p;
+      }
+    }
+  }
+
+  if (total === 0) {
+    return {
+      homeWin: 33.33,
+      draw: 33.33,
+      awayWin: 33.34,
+      over15: 50,
+      over25: 50,
+      under25: 50,
+      btts: 50
+    };
+  }
+
+  return {
+    homeWin: homeWin / total * 100,
+    draw: draw / total * 100,
+    awayWin: awayWin / total * 100,
+    over15: over15 / total * 100,
+    over25: over25 / total * 100,
+    under25: under25 / total * 100,
+    btts: btts / total * 100
+  };
+}
+
+/*
+====================================================
+SCORE LE PLUS PROBABLE
+====================================================
+*/
+
+function mostLikelyScore(matrix) {
+  let bestProbability = -1;
+  let bestScore = "Non disponible";
+
+  for (let h = 0; h < matrix.length; h++) {
+    for (let a = 0; a < matrix[h].length; a++) {
+      if (matrix[h][a] > bestProbability) {
+        bestProbability = matrix[h][a];
+        bestScore = h + "-" + a;
+      }
+    }
+  }
+
+  return {
+    score: bestScore,
+    probability:
+      bestProbability >= 0
+        ? bestProbability * 100
+        : 0
+  };
+}
+
+/*
+====================================================
+BUTS ATTENDUS
+====================================================
+*/
+
+function expectedGoals(homeStats, awayStats) {
   let homeExpected =
-    (homeAttack + awayDefense) / 2;
+    (
+      homeStats.homeGoalsForAvg +
+      awayStats.awayGoalsAgainstAvg
+    ) / 2;
 
   let awayExpected =
-    (awayAttack + homeDefense) / 2;
+    (
+      awayStats.awayGoalsForAvg +
+      homeStats.homeGoalsAgainstAvg
+    ) / 2;
 
   /*
-   * Avantage domicile léger.
+   * Petit avantage domicile.
    */
   homeExpected *= 1.08;
 
-  /*
-   * On évite les valeurs absurdes.
-   */
   homeExpected =
-    clamp(homeExpected, 0.15, 4.5);
+    clamp(
+      homeExpected,
+      0.15,
+      4.5
+    );
 
   awayExpected =
-    clamp(awayExpected, 0.15, 4.5);
+    clamp(
+      awayExpected,
+      0.15,
+      4.5
+    );
 
   return {
     home: homeExpected,
@@ -561,42 +526,43 @@ function calculateExpectedGoals(
   };
 }
 
-function applyFormAdjustment(
+/*
+====================================================
+AJUSTEMENT FORME RÉCENTE
+====================================================
+*/
+
+function adjustForRecentForm(
   probabilities,
   homeStats,
   awayStats,
   h2h
 ) {
   /*
-   * Forme récente.
+   * La forme récente a un poids important.
    */
-  const homeForm =
-    homeStats.winRate;
-
-  const awayForm =
+  const formDifference =
+    homeStats.winRate -
     awayStats.winRate;
 
-  const formDifference =
-    homeForm - awayForm;
-
   probabilities.homeWin +=
-    formDifference * 8;
+    formDifference * 10;
 
   probabilities.awayWin -=
-    formDifference * 8;
+    formDifference * 10;
 
   /*
-   * H2H : influence faible volontairement.
+   * H2H = poids plus faible.
    */
   if (h2h) {
     probabilities.homeWin +=
       h2h.home * 3;
 
-    probabilities.awayWin +=
-      h2h.away * 3;
-
     probabilities.draw +=
       h2h.draw * 2;
+
+    probabilities.awayWin +=
+      h2h.away * 3;
   }
 
   probabilities.homeWin =
@@ -608,9 +574,6 @@ function applyFormAdjustment(
   probabilities.awayWin =
     Math.max(0, probabilities.awayWin);
 
-  /*
-   * Renormalisation.
-   */
   const total =
     probabilities.homeWin +
     probabilities.draw +
@@ -619,69 +582,45 @@ function applyFormAdjustment(
   if (total > 0) {
     probabilities.homeWin =
       probabilities.homeWin /
-      total *
-      100;
+      total * 100;
 
     probabilities.draw =
       probabilities.draw /
-      total *
-      100;
+      total * 100;
 
     probabilities.awayWin =
       probabilities.awayWin /
-      total *
-      100;
+      total * 100;
   }
 
   return probabilities;
 }
 
-function confidenceFromProbabilities(p) {
-  const sorted = [
-    p.homeWin,
-    p.draw,
-    p.awayWin
-  ].sort((a, b) => b - a);
+/*
+====================================================
+VAINQUEUR
+====================================================
+*/
 
-  const best = sorted[0];
-  const second = sorted[1];
-
-  /*
-   * Confiance basée sur :
-   * - probabilité du meilleur résultat
-   * - écart avec le deuxième
-   *
-   * Cela évite d'afficher artificiellement 90-100%.
-   */
-  const margin =
-    Math.max(0, best - second);
-
-  const confidence =
-    best * 0.7 +
-    margin * 0.6;
-
-  return clamp(
-    confidence,
-    30,
-    92
-  );
-}
-
-function predictedWinner(
-  p,
+function winner(
+  probabilities,
   homeName,
   awayName
 ) {
   if (
-    p.homeWin >= p.draw &&
-    p.homeWin >= p.awayWin
+    probabilities.homeWin >=
+    probabilities.draw &&
+    probabilities.homeWin >=
+    probabilities.awayWin
   ) {
     return homeName;
   }
 
   if (
-    p.awayWin >= p.homeWin &&
-    p.awayWin >= p.draw
+    probabilities.awayWin >=
+    probabilities.homeWin &&
+    probabilities.awayWin >=
+    probabilities.draw
   ) {
     return awayName;
   }
@@ -689,109 +628,128 @@ function predictedWinner(
   return "Match nul";
 }
 
-function bestScore(matrix) {
-  let best = -1;
-  let score = null;
+/*
+====================================================
+CONFIANCE
+====================================================
+*/
 
-  for (let h = 0; h < matrix.length; h++) {
-    for (let a = 0; a < matrix[h].length; a++) {
-      if (matrix[h][a] > best) {
-        best = matrix[h][a];
-        score = h + "-" + a;
-      }
-    }
-  }
+function confidence(probabilities) {
+  const values = [
+    probabilities.homeWin,
+    probabilities.draw,
+    probabilities.awayWin
+  ].sort((a, b) => b - a);
 
-  return score || "Non disponible";
+  const best = values[0];
+  const second = values[1];
+
+  const margin =
+    best - second;
+
+  /*
+   * Confiance limitée pour éviter
+   * les faux 90-100%.
+   */
+  return clamp(
+    best * 0.75 +
+    margin * 0.5,
+    30,
+    92
+  );
 }
 
-function underOverLabel(p) {
-  if (p.over25 >= 55) {
+/*
+====================================================
+OVER / UNDER
+====================================================
+*/
+
+function overUnder(probabilities) {
+  if (probabilities.over25 >= 55) {
     return "Over 2.5";
   }
 
-  if (p.over15 >= 65) {
+  if (probabilities.over15 >= 65) {
     return "Over 1.5";
   }
 
   return "Under 2.5";
 }
 
-function bttsLabel(value) {
-  if (value >= 55) {
-    return "Oui";
-  }
+/*
+====================================================
+CONSEIL
+====================================================
+*/
 
-  return "Non";
-}
-
-function advice(
-  winner,
+function createAdvice(
+  pick,
   homeName,
   awayName,
-  p
+  probabilities
 ) {
   const oneX =
-    p.homeWin + p.draw;
+    probabilities.homeWin +
+    probabilities.draw;
 
   const xTwo =
-    p.draw + p.awayWin;
+    probabilities.draw +
+    probabilities.awayWin;
 
-  const over =
-    underOverLabel(p);
+  const goals =
+    overUnder(probabilities);
 
   if (
-    winner === homeName &&
+    pick === homeName &&
     oneX >= 65
   ) {
     return (
       "Double chance : " +
       homeName +
       " ou nul et " +
-      over
+      goals
     );
   }
 
   if (
-    winner === awayName &&
+    pick === awayName &&
     xTwo >= 65
   ) {
     return (
       "Double chance : " +
       awayName +
       " ou nul et " +
-      over
+      goals
     );
   }
 
   if (
-    winner !== "Match nul" &&
+    pick !== "Match nul" &&
     Math.max(
-      p.homeWin,
-      p.awayWin
+      probabilities.homeWin,
+      probabilities.awayWin
     ) >= 55
   ) {
     return (
       "Victoire " +
-      winner +
+      pick +
       " et " +
-      over
+      goals
     );
   }
 
-  return over;
+  return goals;
 }
 
 /*
-==================================================
-PRÉDICTION COMPLÈTE
-==================================================
+====================================================
+PRÉDICTION D'UN MATCH
+====================================================
 */
 
-async function predictFixture(
-  fixture
-) {
-  const fixtureInfo =
+async function predictFixture(fixture) {
+  const info =
     fixture.fixture || {};
 
   const teams =
@@ -806,249 +764,240 @@ async function predictFixture(
   const away =
     teams.away || {};
 
-  const homeId =
-    home.id;
-
-  const awayId =
-    away.id;
-
-  if (!homeId || !awayId) {
+  if (!home.id || !away.id) {
     throw new Error(
-      "Impossible de déterminer les équipes."
+      "Équipes introuvables"
     );
   }
 
-  const season =
-    league.season || null;
-
-  const leagueId =
-    league.id || null;
-
+  /*
+   * IMPORTANT :
+   * aucune saison n'est envoyée.
+   */
   const [
-    homeRecent,
-    awayRecent,
-    h2h
+    homeMatches,
+    awayMatches,
+    h2hMatches
   ] = await Promise.all([
-    getRecentMatches(
-      homeId,
-      leagueId,
-      season
-    ),
-
-    getRecentMatches(
-      awayId,
-      leagueId,
-      season
-    ),
-
-    getH2H(
-      homeId,
-      awayId
-    )
+    getLastMatches(home.id),
+    getLastMatches(away.id),
+    getH2H(home.id, away.id)
   ]);
 
   const homeStats =
-    calculateTeamStats(
-      homeRecent,
-      homeId
+    getTeamStats(
+      homeMatches,
+      home.id
     );
 
   const awayStats =
-    calculateTeamStats(
-      awayRecent,
-      awayId
+    getTeamStats(
+      awayMatches,
+      away.id
     );
 
-  const expected =
-    calculateExpectedGoals(
+  const goals =
+    expectedGoals(
       homeStats,
       awayStats
     );
 
   const matrix =
-    scoreMatrix(
-      expected.home,
-      expected.away
+    createScoreMatrix(
+      goals.home,
+      goals.away
     );
 
-  let p =
-    probabilitiesFromMatrix(
+  let probabilities =
+    calculateProbabilities(
       matrix
     );
 
-  const h2hData =
-    h2hFactor(
-      h2h,
-      homeId
+  const h2h =
+    calculateH2H(
+      h2hMatches,
+      home.id
     );
 
-  p =
-    applyFormAdjustment(
-      p,
+  probabilities =
+    adjustForRecentForm(
+      probabilities,
       homeStats,
       awayStats,
-      h2hData
+      h2h
     );
 
-  const winner =
-    predictedWinner(
-      p,
-      home.name || "Domicile",
-      away.name || "Extérieur"
+  const pick =
+    winner(
+      probabilities,
+      home.name,
+      away.name
     );
-
-  const confidence =
-    confidenceFromProbabilities(p);
 
   const score =
-    bestScore(matrix);
+    mostLikelyScore(matrix);
+
+  const conf =
+    confidence(probabilities);
 
   const oneX =
-    p.homeWin + p.draw;
+    probabilities.homeWin +
+    probabilities.draw;
 
   const xTwo =
-    p.draw + p.awayWin;
-
-  const underOver =
-    underOverLabel(p);
-
-  const btts =
-    bttsLabel(p.btts);
+    probabilities.draw +
+    probabilities.awayWin;
 
   return {
     match: {
       id:
-        fixtureInfo.id ||
-        null,
+        info.id || null,
 
       date:
-        fixtureInfo.date ||
-        null,
+        info.date || null,
 
       league:
-        league.name ||
-        "Inconnu",
+        league.name || "Inconnu",
 
       country:
-        league.country ||
-        "Inconnu",
+        league.country || "Inconnu",
 
       home: {
         id:
-          home.id ||
-          null,
+          home.id || null,
 
         name:
-          home.name ||
-          "Inconnu",
+          home.name || "Inconnu",
 
         logo:
-          home.logo ||
-          null
+          home.logo || null
       },
 
       away: {
         id:
-          away.id ||
-          null,
+          away.id || null,
 
         name:
-          away.name ||
-          "Inconnu",
+          away.name || "Inconnu",
 
         logo:
-          away.logo ||
-          null
+          away.logo || null
       }
     },
 
     prediction: {
       main_pick:
-        winner,
+        pick,
 
       confidence:
-        pct(confidence),
+        percent(conf),
 
       probabilities: {
         v1:
-          pct(p.homeWin),
+          percent(
+            probabilities.homeWin
+          ),
 
         draw:
-          pct(p.draw),
+          percent(
+            probabilities.draw
+          ),
 
         v2:
-          pct(p.awayWin),
+          percent(
+            probabilities.awayWin
+          ),
 
         "1x":
-          pct(oneX),
+          percent(oneX),
 
         "x2":
-          pct(xTwo)
+          percent(xTwo)
       },
 
       predicted_score:
-        score,
+        score.score,
+
+      exact_score:
+        score.score,
+
+      exact_score_probability:
+        percent(
+          score.probability
+        ),
 
       under_over:
-        underOver,
+        overUnder(
+          probabilities
+        ),
 
       btts:
-        btts,
+        probabilities.btts >= 55
+          ? "Oui"
+          : "Non",
 
       api_winner:
-        "Calcul statistique",
+        "Modèle statistique",
 
       win_or_draw:
-        winner === home.name
+        pick === home.name
           ? oneX >= 50
             ? "Oui"
             : "Non"
-          : winner === away.name
+          : pick === away.name
             ? xTwo >= 50
               ? "Oui"
               : "Non"
             : "Oui",
 
+      advice:
+        createAdvice(
+          pick,
+          home.name,
+          away.name,
+          probabilities
+        ),
+
       halftime_score:
         "Non disponible",
-
-      exact_score:
-        score,
-
-      exact_score_probability:
-        "Calculé par modèle",
 
       corners:
         "Non disponible",
 
       yellow_cards:
-        "Non disponible",
-
-      advice:
-        advice(
-          winner,
-          home.name,
-          away.name,
-          p
-        )
+        "Non disponible"
     },
 
     model: {
-      home_expected_goals:
-        Number(
-          expected.home.toFixed(2)
-        ),
+      data_source:
+        "10 derniers matchs disponibles",
 
-      away_expected_goals:
-        Number(
-          expected.away.toFixed(2)
-        ),
+      seasons_used:
+        false,
 
       home_recent_matches:
         homeStats.played,
 
+      away_recent_matches:
+        awayStats.played,
+
       home_recent_wins:
         homeStats.wins,
+
+      away_recent_wins:
+        awayStats.wins,
+
+      home_recent_draws:
+        homeStats.draws,
+
+      away_recent_draws:
+        awayStats.draws,
+
+      home_recent_losses:
+        homeStats.losses,
+
+      away_recent_losses:
+        awayStats.losses,
 
       home_goals_for_avg:
         Number(
@@ -1060,12 +1009,6 @@ async function predictFixture(
           homeStats.goalsAgainstAvg.toFixed(2)
         ),
 
-      away_recent_matches:
-        awayStats.played,
-
-      away_recent_wins:
-        awayStats.wins,
-
       away_goals_for_avg:
         Number(
           awayStats.goalsForAvg.toFixed(2)
@@ -1076,8 +1019,18 @@ async function predictFixture(
           awayStats.goalsAgainstAvg.toFixed(2)
         ),
 
+      expected_home_goals:
+        Number(
+          goals.home.toFixed(2)
+        ),
+
+      expected_away_goals:
+        Number(
+          goals.away.toFixed(2)
+        ),
+
       h2h_matches:
-        h2h.length
+        h2hMatches.length
     },
 
     available: true
@@ -1085,9 +1038,9 @@ async function predictFixture(
 }
 
 /*
-==================================================
-ROUTES
-==================================================
+====================================================
+SERVEUR
+====================================================
 */
 
 app.get("/", (req, res) => {
@@ -1096,9 +1049,12 @@ app.get("/", (req, res) => {
     service:
       "Football Prediction Server",
     status: "online",
-    engine:
-      "Statistical Prediction Engine",
-    date: today()
+    prediction_engine:
+      "10 derniers matchs + Poisson + forme + H2H",
+    season_analysis:
+      false,
+    date:
+      today()
   });
 });
 
@@ -1108,16 +1064,25 @@ app.get("/health", (req, res) => {
     status: "ok",
     api_key_configured:
       Boolean(API_KEY),
+
     prediction_engine:
-      "statistics + poisson + form + h2h",
-    date: today()
+      "recent form + poisson + h2h",
+
+    recent_matches:
+      10,
+
+    seasons_used:
+      false,
+
+    date:
+      today()
   });
 });
 
 /*
-==================================================
-PRÉDICTION D'UN MATCH
-==================================================
+====================================================
+UNE PRÉDICTION
+====================================================
 */
 
 app.get(
@@ -1146,12 +1111,9 @@ app.get(
         });
       }
 
-      const fixture =
-        data.response[0];
-
       const result =
         await predictFixture(
-          fixture
+          data.response[0]
         );
 
       res.json({
@@ -1163,7 +1125,10 @@ app.get(
       });
 
     } catch (error) {
-      console.error(error);
+      console.error(
+        "Prediction error:",
+        error
+      );
 
       res.status(500).json({
         success: false,
@@ -1175,9 +1140,9 @@ app.get(
 );
 
 /*
-==================================================
+====================================================
 PRÉDICTIONS DU JOUR
-==================================================
+====================================================
 */
 
 app.get(
@@ -1189,8 +1154,9 @@ app.get(
         today();
 
       let limit =
-        Number(
-          req.query.limit || 5
+        parseInt(
+          req.query.limit || "5",
+          10
         );
 
       if (!Number.isFinite(limit)) {
@@ -1198,14 +1164,16 @@ app.get(
       }
 
       limit =
-        Math.max(
+        clamp(
+          limit,
           1,
-          Math.min(
-            20,
-            Math.floor(limit)
-          )
+          20
         );
 
+      /*
+       * IMPORTANT :
+       * ici aussi aucune saison.
+       */
       const data =
         await apiGet(
           "/fixtures?date=" +
@@ -1224,7 +1192,7 @@ app.get(
               fixture.fixture &&
               fixture.fixture.status
                 ? fixture.fixture.status.short
-                : null;
+                : "";
 
             return (
               status === "NS" ||
@@ -1247,22 +1215,21 @@ app.get(
               fixture
             );
 
-          matches.push(
-            result
-          );
+          matches.push(result);
 
         } catch (error) {
           console.error(
-            "Erreur prédiction fixture",
+            "Erreur fixture",
             fixture.fixture &&
             fixture.fixture.id,
-            error
+            error.message
           );
         }
       }
 
       res.json({
         success: true,
+
         date:
           date,
 
@@ -1289,9 +1256,9 @@ app.get(
 );
 
 /*
-==================================================
-START
-==================================================
+====================================================
+DÉMARRAGE
+====================================================
 */
 
 app.listen(

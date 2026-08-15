@@ -1,6 +1,7 @@
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
+const { chromium } = require("playwright");
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -31,7 +32,7 @@ app.use((req, res, next) => {
 
 
 /* =====================================================
-   CONFIGURATION API-FOOTBALL
+   CONFIGURATION
 ===================================================== */
 
 const API_FOOTBALL_KEY =
@@ -40,18 +41,23 @@ const API_FOOTBALL_KEY =
 const FOOTBALL_API =
   "https://v3.football.api-sports.io";
 
-
-/* =====================================================
-   HISTORIQUE
-===================================================== */
+const FIFA_URL =
+  "https://1xbet.com/fr/live/fifa";
 
 const HISTORY_FILE =
   path.join(__dirname, "history.json");
 
 let history = [];
 
+
+/* =====================================================
+   HISTORIQUE
+===================================================== */
+
 try {
+
   if (fs.existsSync(HISTORY_FILE)) {
+
     history = JSON.parse(
       fs.readFileSync(
         HISTORY_FILE,
@@ -62,14 +68,20 @@ try {
     if (!Array.isArray(history)) {
       history = [];
     }
+
   }
+
 } catch {
+
   history = [];
+
 }
 
 
 function saveHistory() {
+
   try {
+
     fs.writeFileSync(
       HISTORY_FILE,
       JSON.stringify(
@@ -78,12 +90,16 @@ function saveHistory() {
         2
       )
     );
+
   } catch (error) {
+
     console.log(
       "Erreur historique:",
       error.message
     );
+
   }
+
 }
 
 
@@ -94,55 +110,74 @@ function saveHistory() {
 async function footballApi(endpoint) {
 
   if (!API_FOOTBALL_KEY) {
+
     throw new Error(
-      "API_FOOTBALL_KEY non configurée dans Render."
+      "API_FOOTBALL_KEY non configurée."
     );
+
   }
 
-  const response = await fetch(
-    FOOTBALL_API + endpoint,
-    {
-      headers: {
-        "x-apisports-key":
-          API_FOOTBALL_KEY,
-        "Accept":
-          "application/json"
+  const response =
+    await fetch(
+      FOOTBALL_API + endpoint,
+      {
+        headers: {
+          "x-apisports-key":
+            API_FOOTBALL_KEY,
+
+          "Accept":
+            "application/json"
+        }
       }
-    }
-  );
+    );
+
 
   const text =
     await response.text();
 
+
   let data;
 
   try {
-    data = JSON.parse(text);
+
+    data =
+      JSON.parse(text);
+
   } catch {
+
     throw new Error(
       "Réponse API-Football non JSON."
     );
+
   }
 
+
   if (!response.ok) {
+
     throw new Error(
       "API-Football HTTP " +
       response.status
     );
+
   }
+
 
   if (
     data.errors &&
     Object.keys(data.errors).length
   ) {
+
     throw new Error(
       Object.values(
         data.errors
       ).join(" ")
     );
+
   }
 
+
   return data;
+
 }
 
 
@@ -158,10 +193,13 @@ function getAbidjanDate() {
       {
         timeZone:
           "Africa/Abidjan",
+
         year:
           "numeric",
+
         month:
           "2-digit",
+
         day:
           "2-digit"
       }
@@ -169,12 +207,14 @@ function getAbidjanDate() {
       new Date()
     );
 
+
   const result = {};
 
-  for (const p of parts) {
-    result[p.type] =
-      p.value;
+  for (const part of parts) {
+    result[part.type] =
+      part.value;
   }
+
 
   return (
     result.year +
@@ -183,28 +223,36 @@ function getAbidjanDate() {
     "-" +
     result.day
   );
+
 }
 
 
 function getAbidjanTime(date) {
 
   try {
+
     return new Intl.DateTimeFormat(
       "fr-FR",
       {
         timeZone:
           "Africa/Abidjan",
+
         hour:
           "2-digit",
+
         minute:
           "2-digit"
       }
     ).format(
       new Date(date)
     );
+
   } catch {
+
     return "";
+
   }
+
 }
 
 
@@ -215,13 +263,18 @@ function getAbidjanTime(date) {
 app.get("/", (req, res) => {
 
   res.json({
+
     status: "ok",
+
     service:
       "BOT PREDICTOR",
+
     message:
       "Serveur actif",
+
     timezone:
       "Africa/Abidjan"
+
   });
 
 });
@@ -234,17 +287,24 @@ app.get("/", (req, res) => {
 app.get("/health", (req, res) => {
 
   res.json({
-    status: "online",
+
+    status:
+      "online",
+
     service:
       "BOT PREDICTOR",
+
     api_configured:
       Boolean(
         API_FOOTBALL_KEY
       ),
+
     history_records:
       history.length,
+
     timezone:
       "Africa/Abidjan"
+
   });
 
 });
@@ -265,9 +325,11 @@ app.get(
           "/status"
         );
 
+
       res.json({
 
-        success: true,
+        success:
+          true,
 
         message:
           "Connexion API-Football OK",
@@ -284,7 +346,8 @@ app.get(
 
       res.status(500).json({
 
-        success: false,
+        success:
+          false,
 
         error:
           error.message
@@ -311,18 +374,19 @@ app.get(
         req.query.date ||
         getAbidjanDate();
 
+
       const data =
         await footballApi(
           "/fixtures?date=" +
-          encodeURIComponent(
-            date
-          ) +
+          encodeURIComponent(date) +
           "&timezone=Africa/Abidjan"
         );
 
+
       res.json({
 
-        success: true,
+        success:
+          true,
 
         date,
 
@@ -335,7 +399,8 @@ app.get(
 
       res.status(500).json({
 
-        success: false,
+        success:
+          false,
 
         error:
           error.message
@@ -349,7 +414,7 @@ app.get(
 
 
 /* =====================================================
-   PRÉDICTION
+   PRÉDICTION D'UN MATCH
 ===================================================== */
 
 app.get(
@@ -366,9 +431,11 @@ app.get(
           )
         );
 
+
       res.json({
 
-        success: true,
+        success:
+          true,
 
         prediction:
           data.response?.[0] ||
@@ -380,7 +447,8 @@ app.get(
 
       res.status(500).json({
 
-        success: false,
+        success:
+          false,
 
         error:
           error.message
@@ -394,7 +462,7 @@ app.get(
 
 
 /* =====================================================
-   PRÉDICTIONS DU JOUR
+   PRÉDICTIONS
 ===================================================== */
 
 app.get(
@@ -407,14 +475,14 @@ app.get(
         req.query.date ||
         getAbidjanDate();
 
+
       const fixtureData =
         await footballApi(
           "/fixtures?date=" +
-          encodeURIComponent(
-            date
-          ) +
+          encodeURIComponent(date) +
           "&timezone=Africa/Abidjan"
         );
+
 
       let fixtures =
         fixtureData.response || [];
@@ -429,7 +497,9 @@ app.get(
                 ?.status
                 ?.short;
 
+
             const excluded = [
+
               "FT",
               "AET",
               "PEN",
@@ -444,15 +514,20 @@ app.get(
               "BT",
               "P",
               "LIVE"
+
             ];
+
 
             if (
               excluded.includes(
                 status
               )
             ) {
+
               return false;
+
             }
+
 
             return (
               new Date(
@@ -476,7 +551,11 @@ app.get(
 
 
       const candidates =
-        fixtures.slice(0, 6);
+        fixtures.slice(
+          0,
+          6
+        );
+
 
       const analyses = [];
 
@@ -494,17 +573,21 @@ app.get(
               fixture.fixture.id
             );
 
-          const p =
+
+          const prediction =
             data.response?.[0];
 
-          if (!p) {
+
+          if (!prediction) {
             continue;
           }
 
 
           const percent =
-            p.predictions
-              ?.percent || {};
+            prediction
+              .predictions
+              ?.percent ||
+            {};
 
 
           const home =
@@ -517,6 +600,7 @@ app.get(
               )
             ) || 0;
 
+
           const draw =
             parseFloat(
               String(
@@ -526,6 +610,7 @@ app.get(
                 ""
               )
             ) || 0;
+
 
           const away =
             parseFloat(
@@ -539,8 +624,12 @@ app.get(
 
 
           let type = "N";
-          let confidence = draw;
-          let pick = "Match nul";
+
+          let confidence =
+            draw;
+
+          let pick =
+            "Match nul";
 
 
           if (
@@ -560,7 +649,10 @@ app.get(
                 .home
                 .name;
 
-          } else if (
+          }
+
+
+          else if (
             away >= home &&
             away >= draw
           ) {
@@ -581,7 +673,8 @@ app.get(
 
 
           const goals =
-            p.predictions
+            prediction
+              .predictions
               ?.goals;
 
 
@@ -619,7 +712,7 @@ app.get(
 
             fixture,
 
-            prediction: p,
+            prediction,
 
             type,
 
@@ -637,10 +730,11 @@ app.get(
 
           });
 
+
         } catch (error) {
 
           console.log(
-            "Prediction:",
+            "Prediction indisponible:",
             error.message
           );
 
@@ -662,7 +756,10 @@ app.get(
             x =>
               x.confidence >= 45
           )
-          .slice(0, 2);
+          .slice(
+            0,
+            2
+          );
 
 
       const matches = [];
@@ -855,7 +952,8 @@ app.get(
 
       res.json({
 
-        success: true,
+        success:
+          true,
 
         date,
 
@@ -878,9 +976,16 @@ app.get(
 
     } catch (error) {
 
+      console.error(
+        "Erreur prédictions:",
+        error
+      );
+
+
       res.status(500).json({
 
-        success: false,
+        success:
+          false,
 
         error:
           error.message
@@ -906,11 +1011,13 @@ app.get(
       const fixture =
         req.query.fixture;
 
+
       if (!fixture) {
 
         return res.status(400).json({
 
-          success: false,
+          success:
+            false,
 
           error:
             "fixture manquant"
@@ -931,7 +1038,8 @@ app.get(
 
       res.json({
 
-        success: true,
+        success:
+          true,
 
         fixture,
 
@@ -940,11 +1048,13 @@ app.get(
 
       });
 
+
     } catch (error) {
 
       res.status(500).json({
 
-        success: false,
+        success:
+          false,
 
         error:
           error.message
@@ -970,11 +1080,13 @@ app.get(
       const team =
         req.query.team;
 
+
       if (!team) {
 
         return res.status(400).json({
 
-          success: false,
+          success:
+            false,
 
           error:
             "team manquant"
@@ -996,7 +1108,8 @@ app.get(
 
       res.json({
 
-        success: true,
+        success:
+          true,
 
         team,
 
@@ -1005,11 +1118,13 @@ app.get(
 
       });
 
+
     } catch (error) {
 
       res.status(500).json({
 
-        success: false,
+        success:
+          false,
 
         error:
           error.message
@@ -1035,11 +1150,13 @@ app.get(
       const teams =
         req.query.teams;
 
+
       if (!teams) {
 
         return res.status(400).json({
 
-          success: false,
+          success:
+            false,
 
           error:
             "teams manquant"
@@ -1061,7 +1178,8 @@ app.get(
 
       res.json({
 
-        success: true,
+        success:
+          true,
 
         teams,
 
@@ -1070,11 +1188,13 @@ app.get(
 
       });
 
+
     } catch (error) {
 
       res.status(500).json({
 
-        success: false,
+        success:
+          false,
 
         error:
           error.message
@@ -1103,11 +1223,13 @@ app.get(
       const season =
         req.query.season;
 
+
       if (!league || !season) {
 
         return res.status(400).json({
 
-          success: false,
+          success:
+            false,
 
           error:
             "league et season requis"
@@ -1132,7 +1254,8 @@ app.get(
 
       res.json({
 
-        success: true,
+        success:
+          true,
 
         league,
 
@@ -1143,11 +1266,13 @@ app.get(
 
       });
 
+
     } catch (error) {
 
       res.status(500).json({
 
-        success: false,
+        success:
+          false,
 
         error:
           error.message
@@ -1161,7 +1286,7 @@ app.get(
 
 
 /* =====================================================
-   HISTORIQUE / STATISTIQUES
+   HISTORIQUE
 ===================================================== */
 
 app.get(
@@ -1215,7 +1340,9 @@ app.get(
               "FT",
               "AET",
               "PEN"
-            ].includes(status)
+            ].includes(
+              status
+            )
           ) {
 
             attente++;
@@ -1234,7 +1361,9 @@ app.get(
 
           if (
             home === null ||
-            away === null
+            away === null ||
+            home === undefined ||
+            away === undefined
           ) {
 
             attente++;
@@ -1249,34 +1378,41 @@ app.get(
 
 
           if (
-            item.selection?.type ===
-              "1" &&
+            item.selection?.type === "1" &&
             home > away
           ) {
 
-            result = "GAGNE";
+            result =
+              "GAGNE";
 
-          } else if (
-            item.selection?.type ===
-              "2" &&
+          }
+
+
+          else if (
+            item.selection?.type === "2" &&
             away > home
           ) {
 
-            result = "GAGNE";
+            result =
+              "GAGNE";
 
-          } else if (
-            item.selection?.type ===
-              "N" &&
+          }
+
+
+          else if (
+            item.selection?.type === "N" &&
             home === away
           ) {
 
-            result = "GAGNE";
+            result =
+              "GAGNE";
 
           }
 
 
           item.result =
             result;
+
 
           item.final_score =
             home +
@@ -1285,7 +1421,8 @@ app.get(
 
 
           if (
-            result === "GAGNE"
+            result ===
+            "GAGNE"
           ) {
 
             gagne++;
@@ -1295,6 +1432,7 @@ app.get(
             perdu++;
 
           }
+
 
         } catch {
 
@@ -1325,7 +1463,8 @@ app.get(
 
       res.json({
 
-        success: true,
+        success:
+          true,
 
         total:
           history.length,
@@ -1348,11 +1487,13 @@ app.get(
 
       });
 
+
     } catch (error) {
 
       res.status(500).json({
 
-        success: false,
+        success:
+          false,
 
         error:
           error.message
@@ -1366,146 +1507,385 @@ app.get(
 
 
 /* =====================================================
-   FIFA 1XBET
+   FIFA VIRTUEL 1XBET
+   PLAYWRIGHT / CHROMIUM
 ===================================================== */
 
 app.get(
   "/virtual-fifa",
   async (req, res) => {
 
-    const url =
-      "https://1xbet.com/fr/live/fifa";
+    let browser = null;
 
 
     try {
 
-      const response =
-        await fetch(
-          url,
-          {
-            headers: {
+      browser =
+        await chromium.launch({
 
-              "User-Agent":
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36",
+          headless:
+            true,
 
-              "Accept":
-                "text/html,application/xhtml+xml",
+          args: [
 
-              "Accept-Language":
-                "fr-FR,fr;q=0.9,en;q=0.8"
+            "--no-sandbox",
 
-            }
-          }
-        );
+            "--disable-setuid-sandbox",
 
+            "--disable-dev-shm-usage",
 
-      const html =
-        await response.text();
+            "--disable-gpu",
 
+            "--no-zygote"
 
-      if (!response.ok) {
-
-        return res.status(502).json({
-
-          success: false,
-
-          source: url,
-
-          error:
-            "1xBet HTTP " +
-            response.status
+          ]
 
         });
 
-      }
+
+      const context =
+        await browser.newContext({
+
+          locale:
+            "fr-FR",
+
+          timezoneId:
+            "Africa/Abidjan",
+
+          viewport: {
+
+            width:
+              1366,
+
+            height:
+              900
+
+          },
+
+          userAgent:
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128 Safari/537.36"
+
+        });
+
+
+      const page =
+        await context.newPage();
 
 
       /*
-       * Transformer le HTML en texte.
+       * Bloque uniquement certaines ressources
+       * lourdes. On laisse JavaScript fonctionner.
        */
 
-      let text =
-        html
-          .replace(
-            /<script[\s\S]*?<\/script>/gi,
-            " "
-          )
-          .replace(
-            /<style[\s\S]*?<\/style>/gi,
-            " "
-          )
-          .replace(
-            /<[^>]+>/g,
-            "\n"
-          )
-          .replace(
-            /&nbsp;/gi,
-            " "
-          )
-          .replace(
-            /&amp;/gi,
-            "&"
-          )
-          .replace(
-            /\s+/g,
-            " "
+      await page.route(
+        "**/*",
+        async route => {
+
+          const type =
+            route.request()
+              .resourceType();
+
+
+          if (
+            [
+              "image",
+              "font"
+            ].includes(
+              type
+            )
+          ) {
+
+            await route.abort();
+
+          } else {
+
+            await route.continue();
+
+          }
+
+        }
+      );
+
+
+      /*
+       * Capture les réponses JSON.
+       * C'est important car certains sites
+       * chargent les événements via API après
+       * l'ouverture de la page.
+       */
+
+      const apiResponses = [];
+
+
+      page.on(
+        "response",
+        async response => {
+
+          try {
+
+            const contentType =
+              response
+                .headers()
+                ["content-type"] ||
+              "";
+
+
+            const responseUrl =
+              response.url();
+
+
+            if (
+              contentType
+                .toLowerCase()
+                .includes(
+                  "json"
+                ) ||
+              responseUrl
+                .toLowerCase()
+                .includes(
+                  "livefeed"
+                ) ||
+              responseUrl
+                .toLowerCase()
+                .includes(
+                  "api"
+                )
+            ) {
+
+              apiResponses.push({
+
+                url:
+                  responseUrl,
+
+                status:
+                  response.status(),
+
+                contentType
+
+              });
+
+            }
+
+          } catch {}
+
+        }
+      );
+
+
+      console.log(
+        "Ouverture FIFA:",
+        FIFA_URL
+      );
+
+
+      await page.goto(
+        FIFA_URL,
+        {
+
+          waitUntil:
+            "domcontentloaded",
+
+          timeout:
+            60000
+
+        }
+      );
+
+
+      /*
+       * Laisse le JavaScript de la page
+       * construire les événements.
+       */
+
+      await page.waitForTimeout(
+        10000
+      );
+
+
+      /*
+       * Quelques scrolls permettent de déclencher
+       * le chargement lazy de certains événements.
+       */
+
+      await page.evaluate(
+        async () => {
+
+          for (
+            let i = 0;
+            i < 5;
+            i++
+          ) {
+
+            window.scrollTo(
+              0,
+              document.body.scrollHeight
+            );
+
+            await new Promise(
+              resolve =>
+                setTimeout(
+                  resolve,
+                  1000
+                )
+            );
+
+          }
+
+          window.scrollTo(
+            0,
+            0
+          );
+
+        }
+      );
+
+
+      await page.waitForTimeout(
+        3000
+      );
+
+
+      /*
+       * Récupération du texte réellement
+       * rendu par le navigateur.
+       */
+
+      const bodyText =
+        await page
+          .locator("body")
+          .innerText();
+
+
+      /*
+       * Récupération des liens visibles.
+       */
+
+      const links =
+        await page
+          .locator("a")
+          .evaluateAll(
+            anchors =>
+              anchors.map(
+                a => ({
+
+                  text:
+                    (
+                      a.innerText ||
+                      ""
+                    ).trim(),
+
+                  href:
+                    a.href || ""
+
+                })
+              )
           );
 
 
       /*
-       * Compétitions FIFA détectées.
+       * Récupération de quelques éléments
+       * visibles contenant du contenu FIFA.
        */
 
-      const competitionRegex =
-        /FC\s*(?:24|25|26)[^0-9]{0,80}(?:Rush|5x5|4x4|3x3|Championnat|Ligue|Superligue)?/gi;
-
-
-      const competitions =
-        [
-          ...new Set(
-            (
-              text.match(
-                competitionRegex
-              ) || []
-            ).map(
-              x =>
-                x.trim()
-            )
+      const elements =
+        await page
+          .locator(
+            "body *"
           )
-        ];
+          .evaluateAll(
+            nodes => {
+
+              const result = [];
+
+              for (
+                const node
+                of nodes
+              ) {
+
+                const text =
+                  (
+                    node.innerText ||
+                    ""
+                  )
+                    .replace(
+                      /\s+/g,
+                      " "
+                    )
+                    .trim();
+
+
+                if (
+                  !text ||
+                  text.length > 250
+                ) {
+
+                  continue;
+
+                }
+
+
+                const lower =
+                  text.toLowerCase();
+
+
+                if (
+                  lower.includes(
+                    "fc 24"
+                  ) ||
+                  lower.includes(
+                    "fc 25"
+                  ) ||
+                  lower.includes(
+                    "fc 26"
+                  ) ||
+                  lower.includes(
+                    "fifa"
+                  )
+                ) {
+
+                  result.push(
+                    text
+                  );
+
+                }
+
+              }
+
+
+              return [
+                ...new Set(
+                  result
+                )
+              ];
+
+            }
+          );
 
 
       /*
-       * Équipes présentes dans la page.
-       *
-       * On récupère les noms à partir
-       * des liens FIFA quand ils existent.
+       * Recherche des éléments FIFA.
        */
 
-      const events = [];
+      const fifaElements = [];
 
 
-      const hrefRegex =
-        /href=["']([^"']*\/(?:fifa|football)\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-
-
-      let match;
-
-
-      while (
-        (match =
-          hrefRegex.exec(html)) !== null
+      function addEvent(
+        value,
+        href = null
       ) {
 
-        const href =
-          match[1];
+        if (
+          !value ||
+          value.length > 300
+        ) {
 
-        const raw =
-          match[2]
-            .replace(
-              /<[^>]+>/g,
-              " "
-            )
+          return;
+
+        }
+
+
+        const clean =
+          value
             .replace(
               /\s+/g,
               " "
@@ -1513,159 +1893,218 @@ app.get(
             .trim();
 
 
-        if (!raw) {
-          continue;
+        if (!clean) {
+          return;
         }
 
 
-        const low =
-          (
-            href +
-            " " +
-            raw
-          ).toLowerCase();
+        const lower =
+          clean.toLowerCase();
 
 
         if (
-          !low.includes("fifa") &&
-          !low.includes("fc-24") &&
-          !low.includes("fc-25") &&
-          !low.includes("fc-26")
+          !(
+            lower.includes(
+              "fifa"
+            ) ||
+            lower.includes(
+              "fc 24"
+            ) ||
+            lower.includes(
+              "fc 25"
+            ) ||
+            lower.includes(
+              "fc 26"
+            ) ||
+            lower.includes(
+              "rush"
+            ) ||
+            lower.includes(
+              "3x3"
+            ) ||
+            lower.includes(
+              "4x4"
+            ) ||
+            lower.includes(
+              "5x5"
+            )
+          )
         ) {
-          continue;
+
+          return;
+
         }
-
-
-        let fullUrl =
-          href;
 
 
         if (
-          href.startsWith("/")
+          !fifaElements.some(
+            x =>
+              x.text ===
+              clean
+          )
         ) {
 
-          fullUrl =
-            "https://1xbet.com" +
-            href;
+          fifaElements.push({
+
+            text:
+              clean,
+
+            href:
+              href
+
+          });
 
         }
 
+      }
 
-        events.push({
 
-          title:
-            raw,
+      for (
+        const element
+        of elements
+      ) {
 
-          url:
-            fullUrl
+        addEvent(
+          element
+        );
 
-        });
+      }
+
+
+      for (
+        const link
+        of links
+      ) {
+
+        addEvent(
+          link.text,
+          link.href
+        );
 
       }
 
 
       /*
-       * Détection complémentaire
-       * de lignes FIFA.
+       * Recherche également dans le texte
+       * brut pour les compétitions.
        */
 
-      const lines =
-        text
-          .split(
-            /[.!?]\s+/
-          )
+      const textLines =
+        bodyText
+          .split("\n")
           .map(
             x =>
-              x.trim()
+              x
+                .replace(
+                  /\s+/g,
+                  " "
+                )
+                .trim()
           )
           .filter(Boolean);
 
 
       for (
         const line
-        of lines
+        of textLines
       ) {
 
-        const low =
-          line.toLowerCase();
-
-
-        if (
-          (
-            low.includes("fc 24") ||
-            low.includes("fc 25") ||
-            low.includes("fc 26") ||
-            low.includes("fifa")
-          ) &&
-          line.length < 300
-        ) {
-
-          if (
-            !events.some(
-              e =>
-                e.title ===
-                line
-            )
-          ) {
-
-            events.push({
-
-              title:
-                line,
-
-              url:
-                url
-
-            });
-
-          }
-
-        }
+        addEvent(
+          line
+        );
 
       }
 
 
-      const uniqueEvents =
-        events.filter(
-          (event, index, arr) =>
-            index ===
-            arr.findIndex(
-              x =>
-                x.title ===
-                event.title
-            )
+      /*
+       * Détection des compétitions.
+       */
+
+      const competitions =
+        [
+          ...new Set(
+            fifaElements
+              .map(
+                x =>
+                  x.text
+              )
+              .filter(
+                text => {
+
+                  const lower =
+                    text
+                      .toLowerCase();
+
+                  return (
+                    lower.includes(
+                      "fc 24"
+                    ) ||
+                    lower.includes(
+                      "fc 25"
+                    ) ||
+                    lower.includes(
+                      "fc 26"
+                    ) ||
+                    lower.includes(
+                      "fifa"
+                    )
+                  );
+
+                }
+              )
+          )
+        ];
+
+
+      /*
+       * On limite le JSON pour éviter une
+       * réponse énorme.
+       */
+
+      const events =
+        fifaElements.slice(
+          0,
+          200
         );
 
 
       res.json({
 
-        success: true,
+        success:
+          true,
 
-        source: url,
+        source:
+          FIFA_URL,
+
+        method:
+          "Playwright Chromium",
+
+        page_loaded:
+          true,
 
         fifa_found:
-          competitions.length > 0 ||
-          uniqueEvents.length > 0,
+          events.length > 0,
 
         competitions,
 
-        events:
-          uniqueEvents.slice(
-            0,
-            100
-          ),
+        events,
 
         total:
-          uniqueEvents.length,
+          events.length,
 
-        method:
-          "HTML + extraction",
+        browser_api_responses:
+          apiResponses
+            .slice(
+              0,
+              100
+            ),
 
         message:
-          competitions.length ||
-          uniqueEvents.length
-            ? "Données FIFA détectées."
-            : "La page 1xBet est accessible mais ses événements FIFA ne sont pas exposés dans le HTML récupéré par Render."
+          events.length > 0
+
+            ? "Éléments FIFA récupérés après exécution JavaScript."
+
+            : "La page est accessible mais aucun événement FIFA exploitable n'a été exposé au navigateur."
 
       });
 
@@ -1673,20 +2112,42 @@ app.get(
     } catch (error) {
 
       console.error(
-        "FIFA:",
-        error.message
+        "Erreur FIFA Playwright:",
+        error
       );
+
 
       res.status(500).json({
 
-        success: false,
+        success:
+          false,
 
-        source: url,
+        source:
+          FIFA_URL,
+
+        method:
+          "Playwright Chromium",
 
         error:
-          error.message
+          error.message,
+
+        hint:
+          "Vérifie que Chromium est installé avec npx playwright install chromium."
 
       });
+
+
+    } finally {
+
+      if (browser) {
+
+        try {
+
+          await browser.close();
+
+        } catch {}
+
+      }
 
     }
 
@@ -1705,6 +2166,15 @@ app.listen(
     console.log(
       "BOT PREDICTOR actif sur le port " +
       PORT
+    );
+
+    console.log(
+      "Timezone: Africa/Abidjan"
+    );
+
+    console.log(
+      "FIFA URL: " +
+      FIFA_URL
     );
 
   }

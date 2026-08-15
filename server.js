@@ -1,6 +1,4 @@
 const express = require("express");
-const fs = require("fs");
-const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -25,140 +23,96 @@ app.use((req, res, next) => {
   next();
 });
 
-/* =====================================================
+/* =========================================================
    CONFIGURATION
-===================================================== */
+========================================================= */
 
-const API_FOOTBALL_KEY =
+const API_KEY =
   process.env.API_FOOTBALL_KEY || "";
 
-const FOOTBALL_API =
+const API_URL =
   "https://v3.football.api-sports.io";
 
-const XBET =
-  "https://1xbet.com";
-
-const LIVEFEED =
-  `${XBET}/LiveFeed/`;
-
-const FIFA_PAGE =
-  `${XBET}/fr/live/fifa`;
-
-const HISTORY_FILE =
-  path.join(__dirname, "history.json");
-
-let history = [];
-
-try {
-  if (fs.existsSync(HISTORY_FILE)) {
-    history = JSON.parse(
-      fs.readFileSync(HISTORY_FILE, "utf8")
-    );
-
-    if (!Array.isArray(history)) {
-      history = [];
-    }
-  }
-} catch {
-  history = [];
-}
-
-function saveHistory() {
-  try {
-    fs.writeFileSync(
-      HISTORY_FILE,
-      JSON.stringify(history, null, 2)
-    );
-  } catch (error) {
-    console.log(
-      "Erreur historique:",
-      error.message
-    );
-  }
-}
-
-/* =====================================================
+/* =========================================================
    OUTILS
-===================================================== */
+========================================================= */
 
-function getAbidjanDate() {
-  const parts =
-    new Intl.DateTimeFormat(
-      "en-CA",
-      {
-        timeZone: "Africa/Abidjan",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit"
-      }
-    ).formatToParts(new Date());
-
-  const result = {};
-
-  for (const part of parts) {
-    result[part.type] = part.value;
-  }
-
-  return `${result.year}-${result.month}-${result.day}`;
+function apiHeaders() {
+  return {
+    "x-apisports-key": API_KEY,
+    "Accept": "application/json"
+  };
 }
 
-function getAbidjanTime(date) {
-  try {
-    return new Intl.DateTimeFormat(
-      "fr-FR",
-      {
-        timeZone: "Africa/Abidjan",
-        hour: "2-digit",
-        minute: "2-digit"
-      }
-    ).format(new Date(date));
-  } catch {
-    return "";
+function numberOrNull(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === ""
+  ) {
+    return null;
   }
+
+  const n =
+    Number(
+      String(value)
+        .replace("%", "")
+        .replace(",", ".")
+    );
+
+  return Number.isFinite(n) ? n : null;
 }
 
-function safeString(value) {
-  if (value === null || value === undefined) {
-    return "";
+function percent(value) {
+  const n = numberOrNull(value);
+
+  if (n === null) {
+    return null;
   }
 
-  if (typeof value === "string") {
-    return value;
-  }
-
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
+  return Math.round(n);
 }
 
-/* =====================================================
-   API-FOOTBALL
-===================================================== */
+function displayPercent(value) {
+  const n = percent(value);
 
-async function footballApi(endpoint) {
-  if (!API_FOOTBALL_KEY) {
+  return n === null
+    ? "Non disponible"
+    : `${n}%`;
+}
+
+function safeText(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === ""
+  ) {
+    return "Non disponible";
+  }
+
+  return String(value);
+}
+
+/* =========================================================
+   APPEL API-FOOTBALL
+========================================================= */
+
+async function football(endpoint) {
+  if (!API_KEY) {
     throw new Error(
-      "API_FOOTBALL_KEY non configurée."
+      "API_FOOTBALL_KEY n'est pas configurée dans Render."
     );
   }
 
-  const response =
-    await fetch(
-      FOOTBALL_API + endpoint,
-      {
-        headers: {
-          "x-apisports-key":
-            API_FOOTBALL_KEY,
-          "Accept":
-            "application/json"
-        }
-      }
-    );
+  const response = await fetch(
+    `${API_URL}${endpoint}`,
+    {
+      method: "GET",
+      headers: apiHeaders()
+    }
+  );
 
-  const text =
-    await response.text();
+  const text = await response.text();
 
   let data;
 
@@ -166,7 +120,7 @@ async function footballApi(endpoint) {
     data = JSON.parse(text);
   } catch {
     throw new Error(
-      "Réponse API-Football non JSON."
+      `API-Football a renvoyé une réponse non JSON (HTTP ${response.status}).`
     );
   }
 
@@ -178,7 +132,7 @@ async function footballApi(endpoint) {
 
   if (
     data.errors &&
-    Object.keys(data.errors).length
+    Object.keys(data.errors).length > 0
   ) {
     throw new Error(
       Object.values(data.errors).join(" ")
@@ -188,9 +142,9 @@ async function footballApi(endpoint) {
   return data;
 }
 
-/* =====================================================
+/* =========================================================
    RACINE
-===================================================== */
+========================================================= */
 
 app.get("/", (req, res) => {
   res.json({
@@ -201,124 +155,500 @@ app.get("/", (req, res) => {
   });
 });
 
-/* =====================================================
+/* =========================================================
    HEALTH
-===================================================== */
+========================================================= */
 
 app.get("/health", (req, res) => {
   res.json({
     status: "online",
     service: "BOT PREDICTOR",
-    api_configured:
-      Boolean(API_FOOTBALL_KEY),
-    history_records:
-      history.length,
-    timezone:
-      "Africa/Abidjan"
+    api_configured: Boolean(API_KEY),
+    timezone: "Africa/Abidjan"
   });
 });
 
-/* =====================================================
-   TEST API-FOOTBALL
-===================================================== */
+/* =========================================================
+   TEST API
+========================================================= */
 
-app.get(
-  "/api-test",
-  async (req, res) => {
-    try {
-      const data =
-        await footballApi("/status");
+app.get("/api-test", async (req, res) => {
+  try {
+    const data = await football("/status");
 
-      res.json({
-        success: true,
-        message:
-          "Connexion API-Football OK",
-        results:
-          data.results || 0,
-        response:
-          data.response || null
-      });
+    res.json({
+      success: true,
+      message: "Connexion API-Football OK",
+      results: data.results || 0,
+      response: data.response || null
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        error:
-          error.message
-      });
+/* =========================================================
+   MATCHS DU JOUR
+========================================================= */
+
+app.get("/matches", async (req, res) => {
+  try {
+    const date =
+      req.query.date ||
+      new Date()
+        .toISOString()
+        .slice(0, 10);
+
+    const data = await football(
+      `/fixtures?date=${encodeURIComponent(
+        date
+      )}&timezone=Africa/Abidjan`
+    );
+
+    const matches =
+      Array.isArray(data.response)
+        ? data.response
+        : [];
+
+    res.json({
+      success: true,
+      date,
+      total: matches.length,
+      matches
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/* =========================================================
+   CONSTRUCTION DE LA PRÉDICTION
+========================================================= */
+
+function buildPrediction(
+  fixture,
+  predictionData
+) {
+  const prediction =
+    predictionData?.predictions || {};
+
+  const percentData =
+    prediction.percent || {};
+
+  const homeProbability =
+    percent(percentData.home);
+
+  const drawProbability =
+    percent(percentData.draw);
+
+  const awayProbability =
+    percent(percentData.away);
+
+  /*
+   * 1X = victoire équipe 1 OU nul
+   */
+  const doubleChance1X =
+    homeProbability !== null &&
+    drawProbability !== null
+      ? homeProbability +
+        drawProbability
+      : null;
+
+  /*
+   * X2 = nul OU victoire équipe 2
+   */
+  const doubleChanceX2 =
+    drawProbability !== null &&
+    awayProbability !== null
+      ? drawProbability +
+        awayProbability
+      : null;
+
+  /*
+   * Détermination du pronostic principal.
+   */
+  let mainPick =
+    "Non disponible";
+
+  let confidence = null;
+
+  if (
+    homeProbability !== null &&
+    drawProbability !== null &&
+    awayProbability !== null
+  ) {
+    if (
+      homeProbability >=
+        drawProbability &&
+      homeProbability >=
+        awayProbability
+    ) {
+      mainPick =
+        `Victoire ${fixture.teams.home.name}`;
+
+      confidence =
+        homeProbability;
+    } else if (
+      awayProbability >=
+        homeProbability &&
+      awayProbability >=
+        drawProbability
+    ) {
+      mainPick =
+        `Victoire ${fixture.teams.away.name}`;
+
+      confidence =
+        awayProbability;
+    } else {
+      mainPick = "Match nul";
+      confidence =
+        drawProbability;
     }
   }
-);
 
-/* =====================================================
-   MATCHS
-===================================================== */
+  /*
+   * Score prévisionnel.
+   *
+   * IMPORTANT :
+   * on ne fabrique jamais un score.
+   */
+  let predictedScore =
+    "Non disponible";
 
-app.get(
-  "/matches",
-  async (req, res) => {
-    try {
-      const date =
-        req.query.date ||
-        getAbidjanDate();
+  const goals =
+    prediction.goals || {};
 
-      const data =
-        await footballApi(
-          `/fixtures?date=${encodeURIComponent(
-            date
-          )}&timezone=Africa/Abidjan`
-        );
-
-      res.json({
-        success: true,
-        date,
-        matches:
-          data.response || []
-      });
-
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        error:
-          error.message
-      });
-    }
+  if (
+    goals.home !== null &&
+    goals.home !== undefined &&
+    goals.away !== null &&
+    goals.away !== undefined
+  ) {
+    predictedScore =
+      `${goals.home}-${goals.away}`;
   }
-);
 
-/* =====================================================
-   PRÉDICTION
-===================================================== */
+  /*
+   * Winner fourni directement par API-Football.
+   */
+  let apiWinner =
+    "Non disponible";
+
+  if (prediction.winner) {
+    apiWinner =
+      prediction.winner.name ||
+      "Non disponible";
+  }
+
+  /*
+   * Win or draw.
+   */
+  const winOrDraw =
+    prediction.win_or_draw === true
+      ? "Oui"
+      : prediction.win_or_draw === false
+        ? "Non"
+        : "Non disponible";
+
+  /*
+   * Under / Over.
+   */
+  const underOver =
+    prediction.under_over ||
+    null;
+
+  /*
+   * BTTS si réellement fourni.
+   */
+  let btts =
+    "Non disponible";
+
+  if (
+    prediction.btts !== null &&
+    prediction.btts !== undefined &&
+    prediction.btts !== ""
+  ) {
+    btts =
+      safeText(prediction.btts);
+  }
+
+  /*
+   * Conseil officiel API-Football.
+   */
+  const advice =
+    safeText(prediction.advice);
+
+  return {
+    main_pick: mainPick,
+
+    confidence:
+      confidence === null
+        ? "Non disponible"
+        : `${confidence}%`,
+
+    probabilities: {
+      v1:
+        displayPercent(
+          homeProbability
+        ),
+
+      draw:
+        displayPercent(
+          drawProbability
+        ),
+
+      v2:
+        displayPercent(
+          awayProbability
+        ),
+
+      "1x":
+        doubleChance1X === null
+          ? "Non disponible"
+          : `${doubleChance1X}%`,
+
+      "x2":
+        doubleChanceX2 === null
+          ? "Non disponible"
+          : `${doubleChanceX2}%`
+    },
+
+    predicted_score:
+      predictedScore,
+
+    api_winner:
+      apiWinner,
+
+    win_or_draw:
+      winOrDraw,
+
+    under_over:
+      underOver
+        ? safeText(underOver)
+        : "Non disponible",
+
+    btts,
+
+    advice,
+
+    /*
+     * Ces éléments ne sont PAS inventés.
+     * Ils restent indisponibles lorsque
+     * l'API ne les fournit pas.
+     */
+    halftime_score:
+      "Non disponible",
+
+    exact_score_probability:
+      "Non disponible",
+
+    corners:
+      "Non disponible",
+
+    yellow_cards:
+      "Non disponible"
+  };
+}
+
+/* =========================================================
+   PRÉDICTION D'UN MATCH
+========================================================= */
 
 app.get(
   "/prediction/:fixture",
   async (req, res) => {
     try {
+      const fixtureId =
+        req.params.fixture;
+
+      if (!fixtureId) {
+        return res.status(400).json({
+          success: false,
+          error: "Fixture ID manquant."
+        });
+      }
+
+      /*
+       * UNE SEULE requête prediction
+       * pour ce match.
+       */
       const data =
-        await footballApi(
+        await football(
           `/predictions?fixture=${encodeURIComponent(
-            req.params.fixture
+            fixtureId
           )}`
+        );
+
+      if (
+        !Array.isArray(data.response) ||
+        !data.response[0]
+      ) {
+        return res.json({
+          success: true,
+          available: false,
+          fixture_id:
+            fixtureId,
+          message:
+            "Aucune prédiction API-Football disponible pour ce match."
+        });
+      }
+
+      const item =
+        data.response[0];
+
+      /*
+       * On récupère les informations
+       * du match.
+       */
+      const fixture =
+        item.fixture;
+
+      /*
+       * Selon les réponses API,
+       * teams peut être présent dans
+       * la prédiction.
+       */
+      const predictionFixture =
+        item.fixture || {};
+
+      const teams =
+        item.teams || {};
+
+      const normalizedFixture = {
+        fixture: {
+          id:
+            fixture?.id ||
+            Number(fixtureId),
+
+          date:
+            fixture?.date ||
+            null
+        },
+
+        teams: {
+          home: {
+            id:
+              teams.home?.id ||
+              null,
+
+            name:
+              teams.home?.name ||
+              "Équipe 1",
+
+            logo:
+              teams.home?.logo ||
+              null
+          },
+
+          away: {
+            id:
+              teams.away?.id ||
+              null,
+
+            name:
+              teams.away?.name ||
+              "Équipe 2",
+
+            logo:
+              teams.away?.logo ||
+              null
+          }
+        }
+      };
+
+      /*
+       * Dans certaines réponses,
+       * teams peut ne pas être présent
+       * dans predictions.
+       *
+       * On fait alors une petite
+       * requête fixture pour obtenir
+       * les vrais noms.
+       */
+      if (
+        !normalizedFixture.teams.home.name ||
+        normalizedFixture.teams.home.name ===
+          "Équipe 1"
+      ) {
+        try {
+          const fixtureData =
+            await football(
+              `/fixtures?id=${encodeURIComponent(
+                fixtureId
+              )}`
+            );
+
+          const f =
+            fixtureData.response?.[0];
+
+          if (f) {
+            normalizedFixture.fixture =
+              f.fixture;
+
+            normalizedFixture.teams =
+              f.teams;
+          }
+        } catch {
+          /*
+           * La prédiction reste utilisable
+           * même si cette requête échoue.
+           */
+        }
+      }
+
+      const result =
+        buildPrediction(
+          normalizedFixture,
+          item
         );
 
       res.json({
         success: true,
+        available: true,
+
+        match: {
+          id:
+            normalizedFixture.fixture.id,
+
+          date:
+            normalizedFixture.fixture.date,
+
+          home:
+            normalizedFixture.teams.home,
+
+          away:
+            normalizedFixture.teams.away
+        },
+
         prediction:
-          data.response?.[0] || null
+          result,
+
+        raw_available_fields: {
+          predictions:
+            Object.keys(
+              item.predictions || {}
+            )
+        }
       });
 
     } catch (error) {
       res.status(500).json({
         success: false,
-        error:
-          error.message
+        error: error.message
       });
     }
   }
 );
 
-/* =====================================================
-   PRÉDICTIONS
-===================================================== */
+/* =========================================================
+   PRÉDICTIONS DES MATCHS À VENIR
+========================================================= */
 
 app.get(
   "/predictions",
@@ -326,55 +656,64 @@ app.get(
     try {
       const date =
         req.query.date ||
-        getAbidjanDate();
+        new Date()
+          .toISOString()
+          .slice(0, 10);
 
+      /*
+       * Limite volontaire pour éviter
+       * de consommer inutilement les
+       * appels API.
+       */
+      const requestedLimit =
+        Number(req.query.limit) || 5;
+
+      const limit =
+        Math.min(
+          Math.max(
+            requestedLimit,
+            1
+          ),
+          10
+        );
+
+      /*
+       * 1 appel pour les matchs.
+       */
       const fixtureData =
-        await footballApi(
+        await football(
           `/fixtures?date=${encodeURIComponent(
             date
           )}&timezone=Africa/Abidjan`
         );
 
       let fixtures =
-        fixtureData.response || [];
+        Array.isArray(
+          fixtureData.response
+        )
+          ? fixtureData.response
+          : [];
 
+      /*
+       * Seulement les matchs
+       * non commencés.
+       */
       fixtures =
         fixtures.filter(
-          fixture => {
+          item => {
             const status =
-              fixture.fixture?.status?.short;
+              item.fixture?.status?.short;
 
-            const excluded = [
-              "FT",
-              "AET",
-              "PEN",
-              "CANC",
-              "ABD",
-              "AWD",
-              "WO",
-              "1H",
-              "HT",
-              "2H",
-              "ET",
-              "BT",
-              "P",
-              "LIVE"
-            ];
-
-            if (
-              excluded.includes(status)
-            ) {
-              return false;
-            }
-
-            return (
-              new Date(
-                fixture.fixture.date
-              ) > new Date()
-            );
+            return [
+              "NS",
+              "TBD"
+            ].includes(status);
           }
         );
 
+      /*
+       * Ordre chronologique.
+       */
       fixtures.sort(
         (a, b) =>
           new Date(
@@ -385,273 +724,208 @@ app.get(
           )
       );
 
-      const candidates =
-        fixtures.slice(0, 6);
-
-      const analyses = [];
-
-      for (
-        const fixture
-        of candidates
-      ) {
-        try {
-          const data =
-            await footballApi(
-              `/predictions?fixture=${fixture.fixture.id}`
-            );
-
-          const prediction =
-            data.response?.[0];
-
-          if (!prediction) {
-            continue;
-          }
-
-          const percent =
-            prediction.predictions?.percent ||
-            {};
-
-          const home =
-            parseFloat(
-              String(
-                percent.home || "0"
-              ).replace("%", "")
-            ) || 0;
-
-          const draw =
-            parseFloat(
-              String(
-                percent.draw || "0"
-              ).replace("%", "")
-            ) || 0;
-
-          const away =
-            parseFloat(
-              String(
-                percent.away || "0"
-              ).replace("%", "")
-            ) || 0;
-
-          let type = "N";
-          let confidence = draw;
-          let pick = "Match nul";
-
-          if (
-            home >= draw &&
-            home >= away
-          ) {
-            type = "1";
-            confidence = home;
-            pick =
-              "Victoire " +
-              fixture.teams.home.name;
-          } else if (
-            away >= home &&
-            away >= draw
-          ) {
-            type = "2";
-            confidence = away;
-            pick =
-              "Victoire " +
-              fixture.teams.away.name;
-          }
-
-          const goals =
-            prediction.predictions?.goals;
-
-          let exactScore =
-            "Non disponible";
-
-          if (
-            goals &&
-            Number.isFinite(
-              Number(goals.home)
-            ) &&
-            Number.isFinite(
-              Number(goals.away)
-            )
-          ) {
-            exactScore =
-              `${Number(goals.home)}-${Number(
-                goals.away
-              )}`;
-          }
-
-          analyses.push({
-            fixture,
-            prediction,
-            type,
-            pick,
-            confidence,
-            home,
-            draw,
-            away,
-            exactScore
-          });
-
-        } catch (error) {
-          console.log(
-            "Prediction indisponible:",
-            error.message
-          );
-        }
-      }
-
-      analyses.sort(
-        (a, b) =>
-          b.confidence -
-          a.confidence
-      );
-
-      const selected =
-        analyses
-          .filter(
-            x =>
-              x.confidence >= 45
-          )
-          .slice(0, 2);
+      /*
+       * On limite avant les appels
+       * /predictions.
+       */
+      fixtures =
+        fixtures.slice(
+          0,
+          limit
+        );
 
       const matches = [];
 
+      /*
+       * Une requête prediction
+       * par match sélectionné.
+       */
       for (
-        const item
-        of selected
+        const fixture
+        of fixtures
       ) {
-        const f =
-          item.fixture;
+        try {
+          const data =
+            await football(
+              `/predictions?fixture=${fixture.fixture.id}`
+            );
 
-        const p =
-          item.prediction;
+          const item =
+            data.response?.[0];
 
-        matches.push({
-          match: {
-            id:
-              f.fixture.id,
-            date:
-              f.fixture.date,
-            time:
-              getAbidjanTime(
-                f.fixture.date
-              ),
-            league:
-              f.league?.name || "",
-            country:
-              f.league?.country || "",
-            home: {
-              id:
-                f.teams.home.id,
-              name:
-                f.teams.home.name,
-              logo:
-                f.teams.home.logo
-            },
-            away: {
-              id:
-                f.teams.away.id,
-              name:
-                f.teams.away.name,
-              logo:
-                f.teams.away.logo
-            }
-          },
+          if (!item) {
+            matches.push({
+              match: {
+                id:
+                  fixture.fixture.id,
 
-          prediction: {
-            main_pick:
-              item.pick,
-            type:
-              item.type,
-            home:
-              item.home + "%",
-            draw:
-              item.draw + "%",
-            away:
-              item.away + "%",
-            goals:
-              item.exactScore,
-            advice:
-              p.predictions?.advice ||
-              "Non disponible",
-            btts:
-              p.predictions?.btts ||
-              "Non disponible",
-            under_over:
-              p.predictions?.under_over ||
-              "Non disponible",
-            full_time_score:
-              item.exactScore
-          },
+                date:
+                  fixture.fixture.date,
 
-          consensus: {
-            confidence:
-              item.confidence + "%",
-            score:
-              item.exactScore
-          },
+                league:
+                  fixture.league?.name ||
+                  "Non disponible",
 
-          sources: {
-            api_football: true,
-            recent_form: false,
-            h2h: false
+                country:
+                  fixture.league?.country ||
+                  "Non disponible",
+
+                home:
+                  fixture.teams.home,
+
+                away:
+                  fixture.teams.away
+              },
+
+              prediction: null,
+
+              available: false,
+
+              message:
+                "Prédiction non disponible."
+            });
+
+            continue;
           }
-        });
 
-        history.push({
-          fixture_id:
-            f.fixture.id,
-          created_at:
-            new Date().toISOString(),
-          date:
-            f.fixture.date,
-          league:
-            f.league?.name || "",
-          home:
-            f.teams.home.name,
-          away:
-            f.teams.away.name,
-          selection: {
-            type:
-              item.type,
-            text:
-              item.pick,
-            confidence:
-              item.confidence
-          },
-          predicted_score:
-            item.exactScore,
-          result:
-            "EN_ATTENTE"
-        });
+          const prediction =
+            buildPrediction(
+              fixture,
+              item
+            );
+
+          matches.push({
+            match: {
+              id:
+                fixture.fixture.id,
+
+              date:
+                fixture.fixture.date,
+
+              league:
+                fixture.league?.name ||
+                "Non disponible",
+
+              country:
+                fixture.league?.country ||
+                "Non disponible",
+
+              home:
+                fixture.teams.home,
+
+              away:
+                fixture.teams.away
+            },
+
+            prediction,
+
+            available: true
+          });
+
+        } catch (error) {
+          matches.push({
+            match: {
+              id:
+                fixture.fixture.id,
+
+              date:
+                fixture.fixture.date,
+
+              league:
+                fixture.league?.name ||
+                "Non disponible",
+
+              country:
+                fixture.league?.country ||
+                "Non disponible",
+
+              home:
+                fixture.teams.home,
+
+              away:
+                fixture.teams.away
+            },
+
+            prediction: null,
+
+            available: false,
+
+            error:
+              error.message
+          });
+        }
       }
-
-      saveHistory();
 
       res.json({
         success: true,
         date,
-        analyzed_candidates:
-          candidates.length,
-        analyzed_with_data:
-          analyses.length,
-        selected:
-          matches.length,
-        matches,
-        message:
-          "Analyse terminée."
+        analyzed:
+          fixtures.length,
+        predictions:
+          matches.filter(
+            x => x.available
+          ).length,
+        matches
       });
 
     } catch (error) {
       res.status(500).json({
         success: false,
-        error:
-          error.message
+        error: error.message
       });
     }
   }
 );
 
-/* =====================================================
-   STATISTIQUES
-===================================================== */
+/* =========================================================
+   H2H - 5 DERNIERS MATCHS
+========================================================= */
+
+app.get(
+  "/h2h",
+  async (req, res) => {
+    try {
+      const home =
+        req.query.home;
+
+      const away =
+        req.query.away;
+
+      if (!home || !away) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "home et away sont obligatoires."
+        });
+      }
+
+      const data =
+        await football(
+          `/fixtures/headtohead?h2h=${encodeURIComponent(
+            `${home}-${away}`
+          )}&last=5`
+        );
+
+      res.json({
+        success: true,
+        total:
+          data.results || 0,
+        matches:
+          data.response || []
+      });
+
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+/* =========================================================
+   STATISTIQUES D'UN MATCH
+========================================================= */
 
 app.get(
   "/statistics",
@@ -664,12 +938,12 @@ app.get(
         return res.status(400).json({
           success: false,
           error:
-            "fixture manquant"
+            "fixture obligatoire."
         });
       }
 
       const data =
-        await footballApi(
+        await football(
           `/fixtures/statistics?fixture=${encodeURIComponent(
             fixture
           )}`
@@ -685,427 +959,32 @@ app.get(
     } catch (error) {
       res.status(500).json({
         success: false,
-        error:
-          error.message
+        error: error.message
       });
     }
   }
 );
 
-/* =====================================================
-   HISTORIQUE
-===================================================== */
-
-app.get(
-  "/history",
-  async (req, res) => {
-    try {
-      res.json({
-        success: true,
-        total:
-          history.length,
-        matches:
-          history
-      });
-
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        error:
-          error.message
-      });
-    }
-  }
-);
-
-/* =====================================================
-   LIVEFEED DIAGNOSTIQUE
-===================================================== */
-
-async function requestLiveFeed(
-  endpoint,
-  params = {}
-) {
-  const query =
-    new URLSearchParams(params);
-
-  const url =
-    `${LIVEFEED}${endpoint}?${query.toString()}`;
-
-  const controller =
-    new AbortController();
-
-  const timeout =
-    setTimeout(
-      () => controller.abort(),
-      30000
-    );
-
-  try {
-
-    const response =
-      await fetch(
-        url,
-        {
-          method: "GET",
-
-          redirect: "follow",
-
-          signal:
-            controller.signal,
-
-          headers: {
-
-            "Accept":
-              "application/json, text/plain, */*",
-
-            "Accept-Language":
-              "fr-FR,fr;q=0.9,en;q=0.8",
-
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128 Safari/537.36",
-
-            "Referer":
-              FIFA_PAGE,
-
-            "Origin":
-              XBET,
-
-            "Cache-Control":
-              "no-cache",
-
-            "Pragma":
-              "no-cache"
-
-          }
-        }
-      );
-
-    const finalUrl =
-      response.url;
-
-    const contentType =
-      response.headers.get(
-        "content-type"
-      ) || "";
-
-    const location =
-      response.headers.get(
-        "location"
-      );
-
-    const text =
-      await response.text();
-
-    const preview =
-      text
-        .slice(0, 1500)
-        .replace(
-          /\s+/g,
-          " "
-        );
-
-    let json = null;
-    let jsonError = null;
-
-    try {
-
-      json =
-        JSON.parse(text);
-
-    } catch (error) {
-
-      jsonError =
-        error.message;
-
-    }
-
-    return {
-
-      endpoint,
-
-      requested_url:
-        url,
-
-      final_url:
-        finalUrl,
-
-      http_status:
-        response.status,
-
-      http_ok:
-        response.ok,
-
-      content_type:
-        contentType,
-
-      location:
-        location || null,
-
-      response_length:
-        text.length,
-
-      is_json:
-        json !== null,
-
-      json_error:
-        jsonError,
-
-      response_preview:
-        preview,
-
-      json
-
-    };
-
-  } catch (error) {
-
-    return {
-
-      endpoint,
-
-      requested_url:
-        url,
-
-      error:
-        error.name ===
-        "AbortError"
-          ? "Timeout après 30 secondes"
-          : error.message
-
-    };
-
-  } finally {
-
-    clearTimeout(timeout);
-
-  }
-}
-
-/* =====================================================
-   TEST LIVEFEED
-===================================================== */
-
-app.get(
-  "/virtual-fifa",
-  async (req, res) => {
-
-    const diagnostics = [];
-
-    /*
-     * Première requête :
-     * sports disponibles.
-     */
-
-    diagnostics.push(
-      await requestLiveFeed(
-        "GetSportsShortZip",
-        {
-          sports: "0",
-          lng: "fr",
-          tf: "1000000",
-          country: "1"
-        }
-      )
-    );
-
-    /*
-     * Deuxième requête :
-     * football classique.
-     */
-
-    diagnostics.push(
-      await requestLiveFeed(
-        "Get1x2_Zip",
-        {
-          getEmpty: "true",
-          count: "500",
-          lng: "fr",
-          sports: "1",
-          mode: "4",
-          country: "1"
-        }
-      )
-    );
-
-    /*
-     * Troisième requête :
-     * football virtuel.
-     */
-
-    diagnostics.push(
-      await requestLiveFeed(
-        "Get1x2_Zip",
-        {
-          getEmpty: "true",
-          count: "500",
-          lng: "fr",
-          sports: "1",
-          mode: "4",
-          country: "1",
-          virtualSports: "true"
-        }
-      )
-    );
-
-    /*
-     * Quatrième variante.
-     */
-
-    diagnostics.push(
-      await requestLiveFeed(
-        "Get1x2_VZip",
-        {
-          getEmpty: "true",
-          count: "500",
-          lng: "fr",
-          sports: "1",
-          mode: "4",
-          country: "1",
-          virtualSports: "true"
-        }
-      )
-    );
-
-    const successfulJson =
-      diagnostics.filter(
-        x =>
-          x.is_json === true
-      );
-
-    let events = [];
-
-    for (
-      const diagnostic
-      of successfulJson
-    ) {
-
-      const data =
-        diagnostic.json;
-
-      let value =
-        data?.Value;
-
-      if (
-        Array.isArray(value)
-      ) {
-
-        events =
-          events.concat(value);
-
-      } else if (
-        value &&
-        Array.isArray(value.G)
-      ) {
-
-        events =
-          events.concat(value.G);
-
-      } else if (
-        value &&
-        typeof value === "object"
-      ) {
-
-        events =
-          events.concat(
-            Object.values(value)
-          );
-
-      }
-
-    }
-
-    /*
-     * Supprime les doublons.
-     */
-
-    const unique =
-      events.filter(
-        (event, index, array) => {
-
-          const id =
-            event?.I ??
-            event?.Id ??
-            event?.ID ??
-            JSON.stringify(event);
-
-          return (
-            index ===
-            array.findIndex(
-              other => {
-
-                const otherId =
-                  other?.I ??
-                  other?.Id ??
-                  other?.ID ??
-                  JSON.stringify(other);
-
-                return (
-                  String(otherId) ===
-                  String(id)
-                );
-
-              }
-            )
-          );
-
-        }
-      );
-
-    res.json({
-
-      success:
-        successfulJson.length > 0,
-
-      source:
-        LIVEFEED,
-
-      fifa_found:
-        unique.length > 0,
-
-      events:
-        unique.slice(0, 200),
-
-      total:
-        unique.length,
-
-      diagnostic_count:
-        diagnostics.length,
-
-      json_responses:
-        successfulJson.length,
-
-      diagnostics,
-
-      message:
-        unique.length > 0
-          ? "Données LiveFeed récupérées."
-          : "Aucune donnée LiveFeed exploitable. Les diagnostics montrent maintenant exactement la réponse reçue."
-
-    });
-
-  }
-);
-
-/* =====================================================
+/* =========================================================
    DÉMARRAGE
-===================================================== */
+========================================================= */
 
 app.listen(
   PORT,
   () => {
-
     console.log(
       `BOT PREDICTOR actif sur le port ${PORT}`
     );
 
     console.log(
-      "Timezone: Africa/Abidjan"
+      "API-Football:",
+      API_KEY
+        ? "CONFIGURÉE"
+        : "NON CONFIGURÉE"
     );
 
     console.log(
-      "Route FIFA: /virtual-fifa"
+      "Timezone: Africa/Abidjan"
     );
-
   }
 );

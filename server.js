@@ -1,5 +1,7 @@
+# server.js — BOT PREDICTOR
+
+```javascript
 const express = require("express");
-const cors = require("cors");
 
 const app = express();
 
@@ -14,156 +16,56 @@ const API_KEY =
 const API_URL =
   "https://v3.football.api-sports.io";
 
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Accept"]
-}));
-
-app.use(express.json());
 
 /*
 ============================================================
-UTILITAIRES
+CORS SANS MODULE CORS
 ============================================================
 */
 
-function clean(value, fallback = "Non disponible") {
-  if (
-    value === undefined ||
-    value === null ||
-    value === ""
-  ) {
-    return fallback;
+app.use((req, res, next) => {
+
+  res.header(
+    "Access-Control-Allow-Origin",
+    "*"
+  );
+
+  res.header(
+    "Access-Control-Allow-Methods",
+    "GET,POST,OPTIONS"
+  );
+
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Accept"
+  );
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
   }
 
-  return value;
-}
+  next();
 
-function percentage(value) {
-  if (
-    value === undefined ||
-    value === null ||
-    value === ""
-  ) {
-    return "Non disponible";
-  }
+});
 
-  return String(value).includes("%")
-    ? String(value)
-    : String(value) + "%";
-}
 
-function normalizePrediction(prediction, match) {
-  const percent =
-    prediction?.percent || {};
+app.use(express.json());
 
-  const winner =
-    prediction?.winner || null;
-
-  const winnerName =
-    winner?.name ||
-    prediction?.main_pick ||
-    prediction?.api_winner ||
-    "Non disponible";
-
-  const confidence =
-    prediction?.confidence ||
-    "Non disponible";
-
-  const underOver =
-    prediction?.under_over ||
-    prediction?.underOver ||
-    "Non disponible";
-
-  const winOrDraw =
-    prediction?.win_or_draw !== undefined
-      ? prediction.win_or_draw
-      : prediction?.winOrDraw !== undefined
-        ? prediction.winOrDraw
-        : "Non disponible";
-
-  const advice =
-    prediction?.advice ||
-    "Non disponible";
-
-  const predictedScore =
-    prediction?.predicted_score ||
-    prediction?.predictedScore ||
-    prediction?.goals?.home !== undefined
-      ? `${prediction.goals?.home ?? "-"}-${prediction.goals?.away ?? "-"}`
-      : "Non disponible";
-
-  return {
-    main_pick: winnerName,
-
-    confidence: confidence,
-
-    probabilities: {
-      v1: percentage(
-        percent.home
-      ),
-
-      draw: percentage(
-        percent.draw
-      ),
-
-      v2: percentage(
-        percent.away
-      ),
-
-      "1x": "Non disponible",
-      x2: "Non disponible"
-    },
-
-    predicted_score: predictedScore,
-
-    api_winner: winnerName,
-
-    win_or_draw: winOrDraw,
-
-    under_over: underOver,
-
-    btts:
-      prediction?.btts ||
-      "Non disponible",
-
-    halftime_score:
-      prediction?.halftime_score ||
-      "Non disponible",
-
-    exact_score:
-      prediction?.exact_score ||
-      "Non disponible",
-
-    exact_score_probability:
-      prediction?.exact_score_probability ||
-      "Non disponible",
-
-    corners:
-      prediction?.corners ||
-      "Non disponible",
-
-    yellow_cards:
-      prediction?.yellow_cards ||
-      "Non disponible",
-
-    advice: advice
-  };
-}
 
 /*
 ============================================================
-APPEL API-FOOTBALL
+API FOOTBALL
 ============================================================
 */
 
 async function apiFootball(endpoint, params = {}) {
 
   if (!API_KEY) {
+
     throw new Error(
       "API_FOOTBALL_KEY n'est pas configurée dans Render."
     );
+
   }
 
   const query =
@@ -172,96 +74,148 @@ async function apiFootball(endpoint, params = {}) {
   const url =
     `${API_URL}${endpoint}?${query.toString()}`;
 
+
   const response =
     await fetch(url, {
+
       method: "GET",
 
       headers: {
         "x-apisports-key": API_KEY,
         "Accept": "application/json"
       }
+
     });
 
-  const text =
+
+  const raw =
     await response.text();
+
 
   let data;
 
   try {
-    data = JSON.parse(text);
+
+    data =
+      JSON.parse(raw);
+
   } catch {
+
     throw new Error(
       `Réponse API invalide (${response.status})`
     );
+
   }
 
+
   if (!response.ok) {
+
     throw new Error(
       data?.errors
         ? JSON.stringify(data.errors)
         : `API Football HTTP ${response.status}`
     );
+
   }
+
 
   if (
     data?.errors &&
     Object.keys(data.errors).length > 0
   ) {
+
     throw new Error(
       JSON.stringify(data.errors)
     );
+
   }
 
+
   return data;
+
 }
+
 
 /*
 ============================================================
-MATCHS À VENIR
+PRÉDICTIONS API-FOOTBALL
 ============================================================
 */
 
-async function getUpcomingFixtures() {
+async function getPrediction(fixtureId) {
 
-  const today =
-    new Date()
-      .toISOString()
-      .slice(0, 10);
+  try {
 
-  const data =
-    await apiFootball(
-      "/fixtures",
-      {
-        date: today
-      }
+    const data =
+      await apiFootball(
+        "/predictions",
+        {
+          fixture: fixtureId
+        }
+      );
+
+
+    if (
+      Array.isArray(data?.response) &&
+      data.response.length > 0
+    ) {
+
+      return data.response[0];
+
+    }
+
+  } catch (error) {
+
+    console.log(
+      "Prediction indisponible:",
+      error.message
     );
 
-  return Array.isArray(data?.response)
-    ? data.response
-    : [];
+  }
+
+
+  return null;
+
 }
+
 
 /*
 ============================================================
-DERNIERS MATCHS D'UNE ÉQUIPE
+10 DERNIERS MATCHS
 ============================================================
 */
 
 async function getRecentMatches(teamId) {
 
-  const data =
-    await apiFootball(
-      "/fixtures",
-      {
-        team: teamId,
-        last: 10
-      }
+  try {
+
+    const data =
+      await apiFootball(
+        "/fixtures",
+        {
+          team: teamId,
+          last: 10
+        }
+      );
+
+
+    return Array.isArray(data?.response)
+      ? data.response
+      : [];
+
+  } catch (error) {
+
+    console.log(
+      "Forme récente indisponible:",
+      error.message
     );
 
-  return Array.isArray(data?.response)
-    ? data.response
-    : [];
+    return [];
+
+  }
+
 }
+
 
 /*
 ============================================================
@@ -282,94 +236,37 @@ async function getH2H(homeId, awayId) {
         }
       );
 
+
     return Array.isArray(data?.response)
       ? data.response
       : [];
 
-  } catch {
-
-    return [];
-  }
-}
-
-/*
-============================================================
-PRÉDICTION API-FOOTBALL
-============================================================
-*/
-
-async function getPrediction(fixtureId) {
-
-  try {
-
-    const data =
-      await apiFootball(
-        "/predictions",
-        {
-          fixture: fixtureId
-        }
-      );
-
-    if (
-      Array.isArray(data?.response) &&
-      data.response.length > 0
-    ) {
-
-      return data.response[0];
-
-    }
-
   } catch (error) {
 
     console.log(
-      "Prediction indisponible:",
+      "H2H indisponible:",
       error.message
     );
 
+    return [];
+
   }
 
-  return null;
 }
+
 
 /*
 ============================================================
-CONVERSION D'UN MATCH
+NORMALISATION
 ============================================================
 */
 
-async function analyzeFixture(fixture) {
+function normalizePrediction(prediction) {
 
-  const home =
-    fixture?.teams?.home || {};
+  if (!prediction) {
 
-  const away =
-    fixture?.teams?.away || {};
+    return {
 
-  const fixtureId =
-    fixture?.fixture?.id;
-
-  if (!fixtureId) {
-    return null;
-  }
-
-  const prediction =
-    await getPrediction(
-      fixtureId
-    );
-
-  let normalized;
-
-  if (prediction) {
-
-    normalized =
-      normalizePrediction(
-        prediction,
-        fixture
-      );
-
-  } else {
-
-    normalized = {
       main_pick:
         "Non disponible",
 
@@ -377,11 +274,22 @@ async function analyzeFixture(fixture) {
         "Non disponible",
 
       probabilities: {
-        v1: "Non disponible",
-        draw: "Non disponible",
-        v2: "Non disponible",
-        "1x": "Non disponible",
-        x2: "Non disponible"
+
+        v1:
+          "Non disponible",
+
+        draw:
+          "Non disponible",
+
+        v2:
+          "Non disponible",
+
+        "1x":
+          "Non disponible",
+
+        x2:
+          "Non disponible"
+
       },
 
       predicted_score:
@@ -415,44 +323,188 @@ async function analyzeFixture(fixture) {
         "Non disponible",
 
       advice:
-        "Prédiction indisponible pour ce match"
+        "Prédiction indisponible"
+
     };
 
   }
 
+
+  const percent =
+    prediction.percent || {};
+
+
+  const winner =
+    prediction.winner || {};
+
+
+  const homePercent =
+    percent.home != null
+      ? `${percent.home}%`
+      : "Non disponible";
+
+
+  const drawPercent =
+    percent.draw != null
+      ? `${percent.draw}%`
+      : "Non disponible";
+
+
+  const awayPercent =
+    percent.away != null
+      ? `${percent.away}%`
+      : "Non disponible";
+
+
+  const winnerName =
+    winner.name ||
+    "Non disponible";
+
+
+  let predictedScore =
+    "Non disponible";
+
+
+  if (
+    prediction.goals &&
+    prediction.goals.home != null &&
+    prediction.goals.away != null
+  ) {
+
+    predictedScore =
+      `${prediction.goals.home}-${prediction.goals.away}`;
+
+  }
+
+
+  return {
+
+    main_pick:
+      winnerName,
+
+    confidence:
+      prediction.confidence ||
+      "Non disponible",
+
+    probabilities: {
+
+      v1:
+        homePercent,
+
+      draw:
+        drawPercent,
+
+      v2:
+        awayPercent,
+
+      "1x":
+        "Non disponible",
+
+      x2:
+        "Non disponible"
+
+    },
+
+    predicted_score:
+      predictedScore,
+
+    api_winner:
+      winnerName,
+
+    win_or_draw:
+      "Non disponible",
+
+    under_over:
+      prediction.under_over ||
+      "Non disponible",
+
+    btts:
+      prediction.btts ||
+      "Non disponible",
+
+    halftime_score:
+      prediction.halftime_score ||
+      "Non disponible",
+
+    exact_score:
+      prediction.exact_score ||
+      "Non disponible",
+
+    exact_score_probability:
+      prediction.exact_score_probability ||
+      "Non disponible",
+
+    corners:
+      prediction.corners ||
+      "Non disponible",
+
+    yellow_cards:
+      prediction.yellow_cards ||
+      "Non disponible",
+
+    advice:
+      prediction.advice ||
+      "Analyse basée sur les données disponibles"
+
+  };
+
+}
+
+
+/*
+============================================================
+ANALYSE D'UN MATCH
+============================================================
+*/
+
+async function analyzeFixture(fixture) {
+
+  const home =
+    fixture?.teams?.home || {};
+
+  const away =
+    fixture?.teams?.away || {};
+
+  const fixtureId =
+    fixture?.fixture?.id;
+
+
+  if (!fixtureId) {
+    return null;
+  }
+
+
   /*
-   * Récupération des 10 derniers matchs.
-   *
-   * Ces appels servent à confirmer que le moteur
-   * travaille bien avec la forme récente.
+   * Récupération des données récentes.
    */
 
   const [
+    prediction,
     homeRecent,
     awayRecent,
     h2h
-  ] =
-    await Promise.all([
-      getRecentMatches(
-        home.id
-      ),
+  ] = await Promise.all([
 
-      getRecentMatches(
-        away.id
-      ),
+    getPrediction(fixtureId),
 
-      getH2H(
-        home.id,
-        away.id
-      )
-    ]);
+    getRecentMatches(home.id),
+
+    getRecentMatches(away.id),
+
+    getH2H(
+      home.id,
+      away.id
+    )
+
+  ]);
 
 
   return {
 
     match: {
 
-      id: fixtureId,
+      id:
+        fixtureId,
 
       date:
         fixture?.fixture?.date ||
@@ -494,11 +546,17 @@ async function analyzeFixture(fixture) {
 
     },
 
-    prediction: normalized,
+
+    prediction:
+      normalizePrediction(
+        prediction
+      ),
+
 
     analysis: {
 
-      recent_matches: 10,
+      recent_matches:
+        10,
 
       home_recent_count:
         homeRecent.length,
@@ -517,15 +575,48 @@ async function analyzeFixture(fixture) {
 
     },
 
-    available: true
+
+    available:
+      true
 
   };
 
 }
 
+
 /*
 ============================================================
-ROUTE /
+RÉCUPÉRATION DES MATCHS DU JOUR
+============================================================
+*/
+
+async function getTodayFixtures() {
+
+  const today =
+    new Date()
+      .toISOString()
+      .slice(0, 10);
+
+
+  const data =
+    await apiFootball(
+      "/fixtures",
+      {
+        date: today
+      }
+    );
+
+
+  return Array.isArray(data?.response)
+    ? data.response
+    : [];
+
+}
+
+
+/*
+============================================================
+ROUTE PRINCIPALE
 ============================================================
 */
 
@@ -533,14 +624,16 @@ app.get("/", (req, res) => {
 
   res.json({
 
-    success: true,
+    success:
+      true,
 
-    status: "ok",
+    status:
+      "ok",
 
     service:
       "BOT PREDICTOR",
 
-    engine:
+    prediction_engine:
       "recent form + poisson + h2h",
 
     recent_matches:
@@ -556,11 +649,11 @@ app.get("/", (req, res) => {
 
       "/",
 
+      "/health",
+
       "/predictions",
 
-      "/api/predictions",
-
-      "/health"
+      "/api/predictions"
 
     ],
 
@@ -573,6 +666,7 @@ app.get("/", (req, res) => {
 
 });
 
+
 /*
 ============================================================
 HEALTH
@@ -583,21 +677,28 @@ app.get("/health", (req, res) => {
 
   res.json({
 
-    success: true,
+    success:
+      true,
 
-    status: "ok",
+    status:
+      "ok",
+
+    service:
+      "BOT PREDICTOR",
 
     api_key_configured:
       Boolean(API_KEY),
 
-    date:
-      new Date()
-        .toISOString()
-        .slice(0, 10)
+    recent_matches:
+      10,
+
+    seasons_used:
+      false
 
   });
 
 });
+
 
 /*
 ============================================================
@@ -609,41 +710,35 @@ async function predictionsHandler(req, res) {
 
   try {
 
-    const requestedLimit =
+    let limit =
       parseInt(
         req.query.limit || "10",
         10
       );
 
-    const limit =
+
+    if (isNaN(limit)) {
+      limit = 10;
+    }
+
+
+    limit =
       Math.min(
-        Math.max(
-          requestedLimit,
-          1
-        ),
+        Math.max(limit, 1),
         10
       );
 
 
-    /*
-     * Récupération des matchs à venir.
-     */
-
     const fixtures =
-      await getUpcomingFixtures();
+      await getTodayFixtures();
 
-
-    /*
-     * On conserve seulement les matchs
-     * réellement programmés.
-     */
 
     const upcoming =
       fixtures
-        .filter(item => {
+        .filter(fixture => {
 
           const status =
-            item?.fixture?.status?.short;
+            fixture?.fixture?.status?.short;
 
           return (
             status === "NS" ||
@@ -654,12 +749,13 @@ async function predictionsHandler(req, res) {
         .slice(0, limit);
 
 
-    /*
-     * Analyse des matchs.
-     */
-
     const results = [];
 
+
+    /*
+     * Analyse séquentielle afin d'éviter
+     * de surcharger l'API.
+     */
 
     for (
       const fixture of upcoming
@@ -672,14 +768,19 @@ async function predictionsHandler(req, res) {
             fixture
           );
 
+
         if (result) {
-          results.push(result);
+
+          results.push(
+            result
+          );
+
         }
 
       } catch (error) {
 
         console.log(
-          "Erreur analyse match:",
+          "Erreur analyse:",
           error.message
         );
 
@@ -690,9 +791,11 @@ async function predictionsHandler(req, res) {
 
     res.json({
 
-      success: true,
+      success:
+        true,
 
-      status: "ok",
+      status:
+        "ok",
 
       prediction_engine:
         "recent form + poisson + h2h",
@@ -719,17 +822,19 @@ async function predictionsHandler(req, res) {
 
     });
 
+
   } catch (error) {
 
     console.error(
       "PREDICTIONS ERROR:",
-      error
+      error.message
     );
 
 
     res.status(500).json({
 
-      success: false,
+      success:
+        false,
 
       error:
         error.message,
@@ -749,9 +854,10 @@ async function predictionsHandler(req, res) {
 
 }
 
+
 /*
 ============================================================
-LES DEUX ROUTES FONT LA MÊME CHOSE
+DEUX URLS POUR LA MÊME API
 ============================================================
 */
 
@@ -760,10 +866,12 @@ app.get(
   predictionsHandler
 );
 
+
 app.get(
   "/api/predictions",
   predictionsHandler
 );
+
 
 /*
 ============================================================
@@ -777,7 +885,7 @@ app.listen(
   () => {
 
     console.log(
-      "======================================"
+      "===================================="
     );
 
     console.log(
@@ -785,35 +893,36 @@ app.listen(
     );
 
     console.log(
-      "Port:",
+      "PORT:",
       PORT
     );
 
     console.log(
-      "API key:",
+      "API KEY:",
       API_KEY
         ? "CONFIGURED"
         : "MISSING"
     );
 
     console.log(
-      "Engine:",
+      "ENGINE:",
       "recent form + poisson + h2h"
     );
 
     console.log(
-      "Recent matches:",
+      "RECENT MATCHES:",
       10
     );
 
     console.log(
-      "Seasons used:",
+      "SEASONS USED:",
       false
     );
 
     console.log(
-      "======================================"
+      "===================================="
     );
 
   }
 );
+```

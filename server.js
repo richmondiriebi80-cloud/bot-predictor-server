@@ -1843,7 +1843,99 @@ app.delete(
    DEMARRAGE
 ================================================== */
 
-app.listen(
+app.listen(/* ==================================================
+   FIFA VIRTUEL 1XBET - TEST
+================================================== */
+
+const XBET_LIVE =
+  "https://1xbet.com/LiveFeed/";
+
+app.get("/virtual-fifa", async (req, res) => {
+  try {
+    const params = new URLSearchParams({
+      sports: "0",
+      lng: "fr",
+      tf: "1000000",
+      country: "1"
+    });
+
+    const response = await fetch(
+      XBET_LIVE +
+      "GetSportsShortZip?" +
+      params.toString(),
+      {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0",
+          "Accept":
+            "application/json,text/plain,*/*"
+        }
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(
+        "1xBet HTTP " +
+        response.status
+      );
+    }
+
+    const data =
+      await response.json();
+
+    const sports =
+      Array.isArray(data.Value)
+        ? data.Value
+        : [];
+
+    /*
+     * Recherche du sport FIFA.
+     * On ne suppose pas que son identifiant
+     * est toujours le même.
+     */
+
+    const fifa =
+      sports.filter(item => {
+        const name =
+          String(
+            item.N || ""
+          ).toLowerCase();
+
+        return (
+          name.includes("fifa") ||
+          name.includes("football")
+        );
+      });
+
+    res.json({
+      success: true,
+      source: "1xBet LiveFeed",
+      sport_found:
+        fifa.length > 0,
+      sports_found:
+        fifa.map(item => ({
+          id: item.I,
+          name: item.N
+        })),
+      raw_count:
+        sports.length
+    });
+
+  } catch (error) {
+
+    console.error(
+      "Erreur FIFA 1xBet:",
+      error.message
+    );
+
+    res.status(500).json({
+      success: false,
+      source: "1xBet LiveFeed",
+      error:
+        error.message
+    });
+  }
+});
   PORT,
   () => {
     console.log(

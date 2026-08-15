@@ -1854,3 +1854,270 @@ app.listen(
   }
 );
 ```
+/* ==================================================
+   FIFA VIRTUEL 1XBET
+   TEST - MATCHS EN DIRECT
+================================================== */
+
+const XBET_LIVE_API =
+  "https://1xbet.com/LiveFeed/";
+
+app.get("/virtual-fifa", async (req, res) => {
+  try {
+
+    /* ----------------------------------------------
+       1. RÉCUPÉRER LES SPORTS 1XBET
+    ---------------------------------------------- */
+
+    const sportParams =
+      new URLSearchParams({
+        sports: "0",
+        lng: "fr",
+        tf: "1000000",
+        country: "1"
+      });
+
+    const sportResponse =
+      await fetch(
+        XBET_LIVE_API +
+        "GetSportsShortZip?" +
+        sportParams.toString(),
+        {
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0",
+            "Accept":
+              "application/json,text/plain,*/*"
+          }
+        }
+      );
+
+    if (!sportResponse.ok) {
+      throw new Error(
+        "1xBet Sports HTTP " +
+        sportResponse.status
+      );
+    }
+
+    const sportData =
+      await sportResponse.json();
+
+    const sports =
+      Array.isArray(sportData.Value)
+        ? sportData.Value
+        : [];
+
+
+    /* ----------------------------------------------
+       2. CHERCHER FIFA
+    ---------------------------------------------- */
+
+    const fifaSports =
+      sports.filter((sport) => {
+
+        const name =
+          String(
+            sport.N || ""
+          ).toLowerCase();
+
+        return (
+          name.includes("fifa") ||
+          name.includes("esports football")
+        );
+
+      });
+
+
+    if (fifaSports.length === 0) {
+
+      return res.json({
+        success: true,
+        source: "1xBet LiveFeed",
+        fifa_found: false,
+        message:
+          "Aucun sport FIFA détecté actuellement.",
+        sports_found:
+          sports.map((sport) => ({
+            id: sport.I,
+            name: sport.N
+          }))
+      });
+
+    }
+
+
+    /* ----------------------------------------------
+       3. RÉCUPÉRER LES MATCHS FIFA
+    ---------------------------------------------- */
+
+    const allGames = [];
+
+
+    for (const fifa of fifaSports) {
+
+      const sportId =
+        fifa.I;
+
+      if (
+        sportId === undefined ||
+        sportId === null
+      ) {
+        continue;
+      }
+
+
+      const gameParams =
+        new URLSearchParams({
+          getEmpty: "true",
+          count: "500",
+          lng: "fr",
+          sports: String(sportId)
+        });
+
+
+      const gameResponse =
+        await fetch(
+          XBET_LIVE_API +
+          "Get1x2_Zip?" +
+          gameParams.toString(),
+          {
+            headers: {
+              "User-Agent":
+                "Mozilla/5.0",
+              "Accept":
+                "application/json,text/plain,*/*"
+            }
+          }
+        );
+
+
+      if (!gameResponse.ok) {
+        continue;
+      }
+
+
+      const gameData =
+        await gameResponse.json();
+
+
+      const games =
+        Array.isArray(gameData.Value)
+          ? gameData.Value
+          : [];
+
+
+      for (const game of games) {
+
+        const home =
+          game.O1 ||
+          game.O1N ||
+          "Équipe 1";
+
+        const away =
+          game.O2 ||
+          game.O2N ||
+          "Équipe 2";
+
+
+        allGames.push({
+
+          id:
+            game.I ??
+            null,
+
+          sport:
+            fifa.N ||
+            "FIFA",
+
+          league:
+            game.L ||
+            game.LE ||
+            "FIFA virtuel",
+
+          home,
+
+          away,
+
+          start:
+            game.S ??
+            null,
+
+          score: {
+
+            home:
+              game.SC?.FS?.S1 ??
+              game.SC?.S1 ??
+              null,
+
+            away:
+              game.SC?.FS?.S2 ??
+              game.SC?.S2 ??
+              null
+
+          },
+
+          status:
+            game.SC?.CPS ??
+            game.MIO?.TSt ??
+            null,
+
+          live: true
+
+        });
+
+      }
+
+    }
+
+
+    /* ----------------------------------------------
+       4. RÉPONSE
+    ---------------------------------------------- */
+
+    res.json({
+
+      success: true,
+
+      source:
+        "1xBet LiveFeed",
+
+      fifa_found:
+        true,
+
+      fifa_sports:
+        fifaSports.map((sport) => ({
+          id: sport.I,
+          name: sport.N
+        })),
+
+      total_matches:
+        allGames.length,
+
+      matches:
+        allGames
+
+    });
+
+
+  } catch (error) {
+
+    console.error(
+      "Erreur FIFA 1xBet:",
+      error
+    );
+
+    res.status(500).json({
+
+      success: false,
+
+      source:
+        "1xBet LiveFeed",
+
+      error:
+        error.message
+
+    });
+
+  }
+
+});

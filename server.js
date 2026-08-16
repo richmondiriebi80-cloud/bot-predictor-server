@@ -1,78 +1,71 @@
 const http = require("http");
 const https = require("https");
-const { URL } = require("url");
 
 const PORT = process.env.PORT || 10000;
-const API_KEY = process.env.API_FOOTBALL_KEY || process.env.API_KEY || "";
+const API_KEY =
+  process.env.API_FOOTBALL_KEY ||
+  process.env.API_KEY ||
+  "";
 
 const API_HOST = "v3.football.api-sports.io";
 
 const CANDIDATES = 7;
 const DISPLAY = 2;
 
-let lastRequest = 0;
-let cachedPredictions = null;
-let cachedAt = 0;
+// Cache pour éviter les appels répétés
+let cache = null;
+let cacheTime = 0;
 
-const CACHE_TIME = 60 * 1000;
+const CACHE_DURATION = 60 * 1000;
 
 function apiRequest(path) {
   return new Promise((resolve, reject) => {
-    const options = {
-      hostname: API_HOST,
-      path,
-      method: "GET",
-      headers: {
-        "x-apisports-key": API_KEY,
-        "Accept": "application/json"
-      }
-    };
-
-    const req = https.request(options, (res) => {
-      let data = "";
-
-      res.on("data", chunk => {
-        data += chunk;
-      });
-
-      res.on("end", () => {
-        try {
-          const json = JSON.parse(data);
-
-          if (res.statusCode >= 400) {
-            reject(
-              new Error(
-                json?.message ||
-                json?.errors?.message ||
-                `API HTTP ${res.statusCode}`
-              )
-            );
-            return;
-          }
-
-          resolve(json);
-        } catch (e) {
-          reject(new Error("Réponse API invalide"));
+    const request = https.request(
+      {
+        hostname: API_HOST,
+        path,
+        method: "GET",
+        headers: {
+          "x-apisports-key": API_KEY,
+          "Accept": "application/json"
         }
-      });
-    });
+      },
+      (response) => {
+        let data = "";
 
-    req.on("error", reject);
-    req.end();
+        response.on("data", (chunk) => {
+          data += chunk;
+        });
+
+        response.on("end", () => {
+          try {
+            const json = JSON.parse(data);
+
+            if (response.statusCode >= 400) {
+              reject(
+                new Error(
+                  json?.message ||
+                  json?.errors?.message ||
+                  `API HTTP ${response.statusCode}`
+                )
+              );
+              return;
+            }
+
+            resolve(json);
+          } catch {
+            reject(new Error("Réponse API invalide"));
+          }
+        });
+      }
+    );
+
+    request.on("error", reject);
+    request.end();
   });
 }
 
-function poisson(lambda, k) {
-  return (
-    Math.exp(-lambda) *
-    Math.pow(lambda, k) /
-    factorial(k)
-  );
-}
-
 function factorial(n) {
-  if (n <= 1) return 1;
-
   let result = 1;
 
   for (let i = 2; i <= n; i++) {
@@ -82,27 +75,45 @@ function factorial(n) {
   return result;
 }
 
-function poissonMatch(lambdaHome, lambdaAway) {
+function poisson(lambda, goals) {
+  return (
+    Math.exp(-lambda) *
+    Math.pow(lambda, goals) /
+    factorial(goals)
+  );
+}
+
+/*
+ * Calcule les probabilités 1 / X / 2
+ * et recherche le score exact le plus probable.
+ */
+function calculatePoisson(homeLambda, awayLambda) {
   let homeWin = 0;
   let draw = 0;
   let awayWin = 0;
 
-  let bestScore = "1-0";
+  let bestScore = "1-1";
   let bestProbability = 0;
 
-  for (let h = 0; h <= 6; h++) {
-    for (let a = 0; a <= 6; a++) {
+  for (let homeGoals = 0; homeGoals <= 7; homeGoals++) {
+    for (let awayGoals = 0; awayGoals <= 7; awayGoals++) {
       const probability =
-        poisson(lambdaHome, h) *
-        poisson(lambdaAway, a);
+        poisson(homeLambda, homeGoals) *
+        poisson(awayLambda, awayGoals);
 
-      if (h > a) homeWin += probability;
-      else if (h === a) draw += probability;
-      else awayWin += probability;
+      if (homeGoals > awayGoals) {
+        homeWin += probability;
+      } else if (homeGoals === awayGoals) {
+        draw += probability;
+      } else {
+        awayWin += probability;
+      }
 
       if (probability > bestProbability) {
         bestProbability = probability;
-        bestScore = `${h}-${a}`;
+
+        bestScore =
+          `${homeGoals}-${awayGoals}`;
       }
     }
   }
@@ -116,82 +127,90 @@ function poissonMatch(lambdaHome, lambdaAway) {
   };
 }
 
-function percent(value) {
+function percentage(value) {
   return `${(value * 100).toFixed(1)}%`;
 }
 
-function calculatePoisson(apiPrediction) {
-  let homeLambda = 1.2;
-  let awayLambda = 1.0;
-
-  const advice =
-    apiPrediction?.predictions?.advice || "";
-
-  const score =
-    apiPrediction?.predictions?.goals;
-
-  if (
-    score &&
-    typeof score.home === "number" &&
-    typeof score.away === "number"
-  ) {
-    homeLambda = Math.max(0.3, score.home);
-    awayLambda = Math.max(0.3, score.away);
-  }
-
-  const result =
-    poissonMatch(homeLambda, awayLambda);
-
-  return {
-    homeLambda,
-    awayLambda,
-    ...result,
-    apiAdvice: advice
-  };
-}
-
+/*
+ * Essa fonction utilise les données de prédiction API
+ * lorsqu'elles existent.
+ *
+ * Si l'API Free ne fournit pas certaines données,
+ * on utilise une estimation Poisson neutre plutôt
+ * que d'inventer une forme récente.
+ */
 function buildPrediction(fixture, apiPrediction) {
   const home = fixture.teams.home;
   const away = fixture.teams.away;
 
-  const poissonData =
-    calculatePoisson(apiPrediction);
+  let homeLambda = 1.2;
+  let awayLambda = 1.0;
 
-  let v1 = poissonData.homeWin;
-  let draw = poissonData.draw;
-  let v2 = poissonData.awayWin;
-
-  /*
-   * Si l'API fournit ses propres probabilités,
-   * on les utilise.
-   */
-  const apiPred =
-    apiPrediction?.predictions;
+  const apiGoals =
+    apiPrediction?.predictions?.goals;
 
   if (
-    apiPred?.percent &&
-    apiPred.percent.home &&
-    apiPred.percent.draw &&
-    apiPred.percent.away
+    apiGoals &&
+    typeof apiGoals.home === "number" &&
+    typeof apiGoals.away === "number"
   ) {
-    v1 =
-      parseFloat(apiPred.percent.home) / 100;
+    homeLambda =
+      Math.max(0.2, apiGoals.home);
 
-    draw =
-      parseFloat(apiPred.percent.draw) / 100;
-
-    v2 =
-      parseFloat(apiPred.percent.away) / 100;
+    awayLambda =
+      Math.max(0.2, apiGoals.away);
   }
 
-  const max =
+  const poissonResult =
+    calculatePoisson(
+      homeLambda,
+      awayLambda
+    );
+
+  let v1 = poissonResult.homeWin;
+  let draw = poissonResult.draw;
+  let v2 = poissonResult.awayWin;
+
+  /*
+   * Si l'API donne ses propres pourcentages,
+   * on les utilise.
+   */
+  const apiPercent =
+    apiPrediction?.predictions?.percent;
+
+  if (
+    apiPercent?.home &&
+    apiPercent?.draw &&
+    apiPercent?.away
+  ) {
+    const apiHome =
+      parseFloat(apiPercent.home);
+
+    const apiDraw =
+      parseFloat(apiPercent.draw);
+
+    const apiAway =
+      parseFloat(apiPercent.away);
+
+    if (
+      Number.isFinite(apiHome) &&
+      Number.isFinite(apiDraw) &&
+      Number.isFinite(apiAway)
+    ) {
+      v1 = apiHome / 100;
+      draw = apiDraw / 100;
+      v2 = apiAway / 100;
+    }
+  }
+
+  const maximum =
     Math.max(v1, draw, v2);
 
   let mainPick;
 
-  if (max === v1) {
+  if (maximum === v1) {
     mainPick = home.name;
-  } else if (max === v2) {
+  } else if (maximum === v2) {
     mainPick = away.name;
   } else {
     mainPick = "Match nul";
@@ -200,47 +219,99 @@ function buildPrediction(fixture, apiPrediction) {
   const oneX = v1 + draw;
   const x2 = draw + v2;
 
+  /*
+   * Marché +/− 2.5 buts.
+   */
   const totalLambda =
-    poissonData.homeLambda +
-    poissonData.awayLambda;
+    homeLambda + awayLambda;
 
-  const under25 =
+  const probabilityUnder25 =
     Math.exp(-totalLambda) *
     (
       1 +
       totalLambda +
-      (Math.pow(totalLambda, 2) / 2)
+      Math.pow(totalLambda, 2) / 2
     );
 
-  const over25 =
-    1 - under25;
+  const underOver =
+    probabilityUnder25 >= 0.5
+      ? "Moins de 2.5"
+      : "Plus de 2.5";
 
   /*
-   * Score exact probable calculé
-   * pour la fin du match.
+   * BTTS calculé avec Poisson.
+   */
+  const homeZero =
+    Math.exp(-homeLambda);
+
+  const awayZero =
+    Math.exp(-awayLambda);
+
+  const bttsYes =
+    1 -
+    homeZero -
+    awayZero +
+    Math.exp(-totalLambda);
+
+  const btts =
+    bttsYes >= 0.5
+      ? "Oui"
+      : "Non";
+
+  /*
+   * Score exact probable.
    */
   const exactScore =
-    poissonData.bestScore;
+    poissonResult.bestScore;
+
+  const exactScoreProbability =
+    poissonResult.bestProbability;
 
   const confidence =
-    max * 100;
+    maximum * 100;
 
+  /*
+   * Score de sélection.
+   *
+   * On ne prétend pas avoir la forme récente
+   * puisque le forfait Free ne donne pas le
+   * paramètre "last".
+   */
   const selectionScore =
     confidence;
+
+  const apiWinner =
+    apiPrediction?.predictions?.winner?.name ||
+    null;
+
+  const advice =
+    apiPrediction?.predictions?.advice ||
+    (
+      mainPick === "Match nul"
+        ? "Match équilibré"
+        : `Avantage ${mainPick}`
+    );
 
   return {
     match: {
       id: fixture.fixture.id,
+
       date: fixture.fixture.date,
+
       league:
-        fixture.league?.name || "Football",
+        fixture.league?.name ||
+        "Football",
+
       country:
-        fixture.league?.country || "Monde",
+        fixture.league?.country ||
+        "Monde",
+
       home: {
         id: home.id,
         name: home.name,
         logo: home.logo
       },
+
       away: {
         id: away.id,
         name: away.name,
@@ -255,13 +326,16 @@ function buildPrediction(fixture, apiPrediction) {
         `${confidence.toFixed(1)}%`,
 
       probabilities: {
-        v1: percent(v1),
-        draw: percent(draw),
-        v2: percent(v2),
-        "1x": percent(oneX),
-        x2: percent(x2)
+        v1: percentage(v1),
+        draw: percentage(draw),
+        v2: percentage(v2),
+        "1x": percentage(oneX),
+        x2: percentage(x2)
       },
 
+      /*
+       * Score probable à la fin du match.
+       */
       predicted_score:
         exactScore,
 
@@ -269,22 +343,19 @@ function buildPrediction(fixture, apiPrediction) {
         exactScore,
 
       exact_score_probability:
-        percent(poissonData.bestProbability),
+        percentage(exactScoreProbability),
 
       api_winner:
-        apiPred?.winner?.name ||
-        mainPick,
+        apiWinner || "Non disponible",
 
       win_or_draw:
-        percent(oneX),
+        percentage(oneX),
 
       under_over:
-        under25 >= 0.5
-          ? "Moins de 2.5"
-          : "Plus de 2.5",
+        underOver,
 
       btts:
-        "Calcul Poisson",
+        btts,
 
       halftime_score:
         "Non disponible",
@@ -296,27 +367,33 @@ function buildPrediction(fixture, apiPrediction) {
         "Non disponible",
 
       advice:
-        apiPred?.advice ||
-        "Analyse API + Poisson"
+        advice
     },
 
     analysis: {
       selection_score:
         Number(selectionScore.toFixed(2)),
 
-      data_quality: 100,
+      /*
+       * 100 signifie seulement que les données
+       * utilisées sont valides, pas que la prédiction
+       * est garantie.
+       */
+      data_quality:
+        apiPrediction ? 100 : 70,
 
       recent_matches:
-        "Non disponible avec le plan API actuel",
+        "Non disponible avec le plan API Free",
 
-      h2h_count: 0,
+      h2h_count:
+        0,
 
       poisson: {
         home_lambda:
-          Number(poissonData.homeLambda.toFixed(2)),
+          Number(homeLambda.toFixed(2)),
 
         away_lambda:
-          Number(poissonData.awayLambda.toFixed(2)),
+          Number(awayLambda.toFixed(2)),
 
         predicted_score:
           exactScore
@@ -325,9 +402,16 @@ function buildPrediction(fixture, apiPrediction) {
       api_prediction_available:
         !!apiPrediction,
 
+      api_probabilities_available:
+        !!(
+          apiPrediction?.predictions?.percent
+        ),
+
       data_sources: {
         prediction:
-          apiPrediction ? "ok" : "unavailable",
+          apiPrediction
+            ? "ok"
+            : "unavailable",
 
         recent_form:
           "unavailable",
@@ -338,108 +422,122 @@ function buildPrediction(fixture, apiPrediction) {
 
       errors: {
         recent_form:
-          "Désactivé pour respecter le forfait API Free",
+          "Désactivé : paramètre last indisponible sur le forfait Free",
 
         h2h:
           "Désactivé volontairement",
 
         prediction:
-          apiPrediction ? null : "Indisponible"
+          apiPrediction
+            ? null
+            : "Prédiction API indisponible"
       },
 
-      seasons_used: false,
+      seasons_used:
+        false,
 
       engine:
         "Prédiction API + Poisson + score exact probable"
     },
 
-    available: true
+    available:
+      true
   };
 }
 
+/*
+ * Récupération des matchs du jour.
+ */
 async function getFixtures() {
-  /*
-   * On demande les matchs du jour.
-   */
   const today =
-    new Date().toISOString().slice(0, 10);
+    new Date()
+      .toISOString()
+      .slice(0, 10);
 
-  const response =
+  const result =
     await apiRequest(
       `/fixtures?date=${today}&status=NS`
     );
 
-  return response?.response || [];
+  return result?.response || [];
 }
 
-async function getApiPrediction(fixtureId) {
+/*
+ * Une seule prédiction API par match.
+ *
+ * Aucun appel H2H.
+ * Aucun appel avec "last".
+ */
+async function getPrediction(fixtureId) {
   try {
-    const response =
+    const result =
       await apiRequest(
         `/predictions?fixture=${fixtureId}`
       );
 
-    return response?.response?.[0] || null;
+    return (
+      result?.response?.[0] ||
+      null
+    );
   } catch (error) {
+    console.error(
+      `Prediction ${fixtureId}:`,
+      error.message
+    );
+
     return null;
   }
 }
 
+/*
+ * Analyse des 7 candidats.
+ */
 async function generatePredictions() {
+  const now =
+    Date.now();
+
   /*
-   * Protection contre trop de requêtes.
+   * Utilise le cache si disponible.
    */
-  const now = Date.now();
-
   if (
-    cachedPredictions &&
-    now - cachedAt < CACHE_TIME
+    cache &&
+    now - cacheTime <
+      CACHE_DURATION
   ) {
-    return cachedPredictions;
+    return cache;
   }
-
-  if (
-    now - lastRequest < 6000
-  ) {
-    if (cachedPredictions) {
-      return cachedPredictions;
-    }
-  }
-
-  lastRequest = now;
 
   const fixtures =
     await getFixtures();
 
   /*
-   * On limite à 7 candidats.
+   * Maximum 7 candidats.
    */
   const candidates =
-    fixtures.slice(0, CANDIDATES);
+    fixtures.slice(
+      0,
+      CANDIDATES
+    );
 
   const analyzed = [];
 
-  /*
-   * Une requête API de prédiction par candidat.
-   * Aucun H2H et aucune requête "last".
-   */
   for (const fixture of candidates) {
     const apiPrediction =
-      await getApiPrediction(
+      await getPrediction(
         fixture.fixture.id
       );
 
-    const prediction =
+    const result =
       buildPrediction(
         fixture,
         apiPrediction
       );
 
-    analyzed.push(prediction);
+    analyzed.push(result);
   }
 
   /*
-   * Classement par qualité/précision.
+   * Classement.
    */
   analyzed.sort(
     (a, b) =>
@@ -448,16 +546,19 @@ async function generatePredictions() {
   );
 
   /*
-   * Seulement les 2 meilleurs sont affichés.
+   * On affiche uniquement les 2 meilleurs.
    */
   const topTwo =
     analyzed
       .slice(0, DISPLAY)
       .map((item, index) => ({
         ...item,
+
         analysis: {
           ...item.analysis,
-          rank: index + 1
+
+          rank:
+            index + 1
         }
       }));
 
@@ -479,7 +580,7 @@ async function generatePredictions() {
       topTwo.length,
 
     displayed:
-      DISPLAY,
+      topTwo.length,
 
     selection:
       "Top 2 après analyse complète",
@@ -494,143 +595,177 @@ async function generatePredictions() {
       topTwo,
 
     recent_matches:
-      "Non disponible avec le plan API actuel",
+      "Non disponible avec le plan API Free",
 
     seasons_used:
       false,
 
     date:
-      new Date().toISOString().slice(0, 10)
+      new Date()
+        .toISOString()
+        .slice(0, 10)
   };
 
-  cachedPredictions = result;
-  cachedAt = Date.now();
+  cache =
+    result;
+
+  cacheTime =
+    Date.now();
 
   return result;
 }
 
-function sendJson(res, status, data) {
-  const body =
-    JSON.stringify(data);
+/*
+ * Réponse JSON avec CORS intégré.
+ *
+ * Aucun package cors nécessaire.
+ */
+function sendJson(
+  response,
+  status,
+  data
+) {
+  response.writeHead(
+    status,
+    {
+      "Content-Type":
+        "application/json; charset=utf-8",
 
-  res.writeHead(status, {
-    "Content-Type":
-      "application/json; charset=utf-8",
+      "Access-Control-Allow-Origin":
+        "*",
 
-    "Access-Control-Allow-Origin":
-      "*",
+      "Access-Control-Allow-Methods":
+        "GET, OPTIONS",
 
-    "Access-Control-Allow-Methods":
-      "GET, OPTIONS",
+      "Access-Control-Allow-Headers":
+        "Content-Type"
+    }
+  );
 
-    "Access-Control-Allow-Headers":
-      "Content-Type"
-  });
-
-  res.end(body);
+  response.end(
+    JSON.stringify(data)
+  );
 }
 
 const server =
   http.createServer(
-    async (req, res) => {
+    async (request, response) => {
 
       /*
-       * CORS sans package cors.
+       * CORS preflight.
        */
-      if (req.method === "OPTIONS") {
-        sendJson(res, 200, {
-          success: true
-        });
-
-        return;
-      }
-
-      const url =
-        new URL(
-          req.url,
-          `http://${req.headers.host}`
+      if (
+        request.method ===
+        "OPTIONS"
+      ) {
+        sendJson(
+          response,
+          200,
+          {
+            success: true
+          }
         );
 
+        return;
+      }
+
       /*
-       * Health check Render.
+       * Page principale / Health check.
        */
       if (
-        req.method === "GET" &&
-        url.pathname === "/"
+        request.method === "GET" &&
+        request.url === "/"
       ) {
-        sendJson(res, 200, {
-          success: true,
-          status: "ok",
-          service: "BOT PREDICTOR",
+        sendJson(
+          response,
+          200,
+          {
+            success: true,
 
-          prediction_engine:
-            "Prédiction API + Poisson + score exact probable",
+            status: "ok",
 
-          candidates_requested:
-            CANDIDATES,
+            service:
+              "BOT PREDICTOR",
 
-          displayed:
-            DISPLAY,
+            prediction_engine:
+              "Prédiction API + Poisson + score exact probable",
 
-          api_key_configured:
-            !!API_KEY,
+            candidates_requested:
+              CANDIDATES,
 
-          h2h:
-            false,
+            displayed:
+              DISPLAY,
 
-          rate_limit_protection:
-            true,
+            api_key_configured:
+              Boolean(API_KEY),
 
-          message:
-            "Serveur opérationnel"
-        });
+            rate_limit_protection:
+              true,
+
+            h2h:
+              false,
+
+            message:
+              "Serveur opérationnel"
+          }
+        );
 
         return;
       }
 
       /*
-       * Endpoint prédictions.
+       * Endpoint principal.
        */
       if (
-        req.method === "GET" &&
-        url.pathname === "/api/predictions"
+        request.method === "GET" &&
+        request.url.startsWith(
+          "/api/predictions"
+        )
       ) {
         try {
           const result =
             await generatePredictions();
 
           sendJson(
-            res,
+            response,
             200,
             result
           );
 
         } catch (error) {
-
           console.error(
-            "Prediction error:",
+            "SERVER ERROR:",
             error
           );
 
-          sendJson(res, 500, {
-            success: false,
+          sendJson(
+            response,
+            500,
+            {
+              success: false,
 
-            error:
-              error.message ||
-              "Erreur serveur",
-
-            message:
-              "Impossible de générer les prédictions"
-          });
+              error:
+                error.message ||
+                "Erreur serveur"
+            }
+          );
         }
 
         return;
       }
 
-      sendJson(res, 404, {
-        success: false,
-        error: "Route introuvable"
-      });
+      /*
+       * Route inconnue.
+       */
+      sendJson(
+        response,
+        404,
+        {
+          success: false,
+          error:
+            "Route introuvable"
+        }
+      );
     }
   );
 
@@ -639,11 +774,23 @@ server.listen(
   "0.0.0.0",
   () => {
     console.log(
-      `BOT PREDICTOR démarré sur le port ${PORT}`
+      "================================="
     );
 
     console.log(
-      `API key configurée : ${!!API_KEY}`
+      "BOT PREDICTOR - SERVEUR"
+    );
+
+    console.log(
+      "================================="
+    );
+
+    console.log(
+      `Port : ${PORT}`
+    );
+
+    console.log(
+      `API configurée : ${Boolean(API_KEY)}`
     );
 
     console.log(
@@ -651,11 +798,27 @@ server.listen(
     );
 
     console.log(
-      `Matchs affichés : ${DISPLAY}`
+      `Affichage : ${DISPLAY}`
     );
 
     console.log(
       "H2H : désactivé"
+    );
+
+    console.log(
+      "Forme récente : désactivée"
+    );
+
+    console.log(
+      "Poisson : activé"
+    );
+
+    console.log(
+      "Score exact probable : activé"
+    );
+
+    console.log(
+      "================================="
     );
   }
 );

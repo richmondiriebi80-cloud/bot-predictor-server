@@ -6,16 +6,14 @@ const PORT = process.env.PORT || 10000;
 const API_KEY = process.env.API_FOOTBALL_KEY || "";
 const API_URL = "https://v3.football.api-sports.io";
 
-const MAX_CANDIDATES = 7;
-const MAX_DISPLAYED = 2;
-
-/*
-=========================================================
-CORS
-=========================================================
-*/
+const CANDIDATES = 7;
+const DISPLAYED = 2;
 
 app.use(express.json());
+
+/* =========================
+   CORS
+========================= */
 
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -35,28 +33,52 @@ app.use((req, res, next) => {
   next();
 });
 
-/*
-=========================================================
-OUTILS
-=========================================================
-*/
+/* =========================
+   OUTILS
+========================= */
 
-function num(value, fallback = 0) {
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function number(value, fallback = null) {
+  if (
+    value === undefined ||
+    value === null ||
+    value === ""
+  ) {
+    return fallback;
+  }
+
   const n = Number(
-    String(value ?? "")
+    String(value)
       .replace("%", "")
       .trim()
   );
 
-  return Number.isFinite(n) ? n : fallback;
+  return Number.isFinite(n)
+    ? n
+    : fallback;
 }
 
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
+function percentage(value) {
+  const n = number(value);
+
+  if (n === null) {
+    return null;
+  }
+
+  return Math.max(
+    0,
+    Math.min(100, n)
+  );
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+function poisson(lambda, goals) {
+  return (
+    Math.exp(-lambda) *
+    Math.pow(lambda, goals)
+  ) / factorial(goals);
 }
 
 function factorial(n) {
@@ -71,40 +93,29 @@ function factorial(n) {
   return result;
 }
 
-function poisson(lambda, goals) {
-  lambda = Math.max(0.01, lambda);
+/* =========================
+   CACHE
+========================= */
 
-  return (
-    Math.exp(-lambda) *
-    Math.pow(lambda, goals)
-  ) / factorial(goals);
-}
+let fixturesCache = null;
+let fixturesCacheTime = 0;
 
-/*
-=========================================================
-CACHE
-=========================================================
-*/
+const predictionCache = new Map();
 
-const cache = {
-  fixtures: null,
-  fixturesTime: 0,
-  predictions: new Map()
-};
+const CACHE_TIME =
+  60 * 1000;
 
-const CACHE_TIME = 60 * 1000;
+/* =========================
+   API FOOTBALL
+========================= */
 
-/*
-=========================================================
-API FOOTBALL
-=========================================================
-*/
-
-async function apiRequest(endpoint, params = {}) {
-
+async function apiRequest(
+  endpoint,
+  params = {}
+) {
   if (!API_KEY) {
     throw new Error(
-      "API_FOOTBALL_KEY manquante dans Render"
+      "API_FOOTBALL_KEY manquante"
     );
   }
 
@@ -119,20 +130,21 @@ async function apiRequest(endpoint, params = {}) {
 
   const response =
     await fetch(url, {
-      method: "GET",
       headers: {
-        "x-apisports-key": API_KEY,
-        "Accept": "application/json"
+        "x-apisports-key":
+          API_KEY,
+        "Accept":
+          "application/json"
       }
     });
 
-  const raw =
+  const text =
     await response.text();
 
   let data;
 
   try {
-    data = JSON.parse(raw);
+    data = JSON.parse(text);
   } catch {
     throw new Error(
       "Réponse API invalide"
@@ -161,21 +173,19 @@ async function apiRequest(endpoint, params = {}) {
   return data;
 }
 
-/*
-=========================================================
-MATCHS DU JOUR
-=========================================================
-*/
+/* =========================
+   MATCHS DU JOUR
+========================= */
 
-async function getTodayFixtures() {
-
+async function getFixtures() {
   const now = Date.now();
 
   if (
-    cache.fixtures &&
-    now - cache.fixturesTime < CACHE_TIME
+    fixturesCache &&
+    now - fixturesCacheTime <
+      CACHE_TIME
   ) {
-    return cache.fixtures;
+    return fixturesCache;
   }
 
   const date =
@@ -186,16 +196,18 @@ async function getTodayFixtures() {
   const data =
     await apiRequest(
       "/fixtures",
-      { date }
+      {
+        date
+      }
     );
 
-  const fixtures =
+  const response =
     Array.isArray(data.response)
       ? data.response
       : [];
 
   const upcoming =
-    fixtures.filter(item => {
+    response.filter(item => {
 
       const status =
         item.fixture?.status?.short;
@@ -206,35 +218,33 @@ async function getTodayFixtures() {
       );
     });
 
-  cache.fixtures = upcoming;
-  cache.fixturesTime = now;
+  fixturesCache =
+    upcoming;
+
+  fixturesCacheTime =
+    now;
 
   return upcoming;
 }
 
-/*
-=========================================================
-PREDICTION
-=========================================================
+/* =========================
+   PREDICTION API
+========================= */
 
-UN SEUL appel prediction par match.
-Aucun "last=7".
-Aucun "last=10".
-=========================================================
-*/
-
-async function getPrediction(fixtureId) {
-
+async function getPrediction(
+  fixtureId
+) {
   if (
-    cache.predictions.has(fixtureId)
+    predictionCache.has(
+      fixtureId
+    )
   ) {
-    return cache.predictions.get(
+    return predictionCache.get(
       fixtureId
     );
   }
 
   try {
-
     const data =
       await apiRequest(
         "/predictions",
@@ -245,7 +255,9 @@ async function getPrediction(fixtureId) {
       );
 
     const prediction =
-      Array.isArray(data.response) &&
+      Array.isArray(
+        data.response
+      ) &&
       data.response.length
         ? data.response[0]
         : null;
@@ -255,7 +267,7 @@ async function getPrediction(fixtureId) {
       error: null
     };
 
-    cache.predictions.set(
+    predictionCache.set(
       fixtureId,
       result
     );
@@ -264,49 +276,46 @@ async function getPrediction(fixtureId) {
 
   } catch (error) {
 
-    const result = {
+    return {
       prediction: null,
-      error: error.message
+      error:
+        error.message
     };
-
-    return result;
   }
 }
 
-/*
-=========================================================
-PROBABILITÉS
-=========================================================
-*/
+/* =========================
+   PROBABILITÉS API
+========================= */
 
-function getProbabilities(prediction) {
-
+function readApiProbabilities(
+  prediction
+) {
   if (!prediction) {
     return null;
   }
 
   const percent =
-    prediction.predictions?.percent ||
-    prediction.percent ||
-    null;
+    prediction.predictions
+      ?.percent;
 
   if (!percent) {
     return null;
   }
 
   const home =
-    num(percent.home, NaN);
+    percentage(percent.home);
 
   const draw =
-    num(percent.draw, NaN);
+    percentage(percent.draw);
 
   const away =
-    num(percent.away, NaN);
+    percentage(percent.away);
 
   if (
-    !Number.isFinite(home) ||
-    !Number.isFinite(draw) ||
-    !Number.isFinite(away)
+    home === null ||
+    draw === null ||
+    away === null
   ) {
     return null;
   }
@@ -318,24 +327,23 @@ function getProbabilities(prediction) {
   };
 }
 
-/*
-=========================================================
-POISSON
-=========================================================
-*/
+/* =========================
+   POISSON
+========================= */
 
 function calculatePoisson() {
 
   /*
-   * Valeurs neutres uniquement lorsque
-   * l'API ne fournit pas assez de données.
-   *
-   * Elles ne sont pas présentées comme
-   * des statistiques réelles des équipes.
+   * Modèle de secours lorsque
+   * l'API ne fournit pas toutes
+   * les statistiques nécessaires.
    */
 
-  const homeLambda = 1.20;
-  const awayLambda = 1.00;
+  const homeLambda =
+    1.20;
+
+  const awayLambda =
+    1.00;
 
   let homeWin = 0;
   let draw = 0;
@@ -346,39 +354,42 @@ function calculatePoisson() {
   let bestAway = 0;
 
   for (
-    let h = 0;
-    h <= 6;
-    h++
+    let home = 0;
+    home <= 6;
+    home++
   ) {
 
     for (
-      let a = 0;
-      a <= 6;
-      a++
+      let away = 0;
+      away <= 6;
+      away++
     ) {
 
-      const probability =
-        poisson(homeLambda, h) *
-        poisson(awayLambda, a);
+      const p =
+        poisson(
+          homeLambda,
+          home
+        ) *
+        poisson(
+          awayLambda,
+          away
+        );
 
-      if (h > a) {
-        homeWin += probability;
-      } else if (h === a) {
-        draw += probability;
+      if (home > away) {
+        homeWin += p;
+      } else if (home === away) {
+        draw += p;
       } else {
-        awayWin += probability;
+        awayWin += p;
       }
 
       if (
-        probability >
+        p >
         bestProbability
       ) {
-
-        bestProbability =
-          probability;
-
-        bestHome = h;
-        bestAway = a;
+        bestProbability = p;
+        bestHome = home;
+        bestAway = away;
       }
     }
   }
@@ -401,67 +412,153 @@ function calculatePoisson() {
       bestProbability * 100,
 
     homeLambda,
+
     awayLambda
   };
 }
 
-/*
-=========================================================
-SCORE DE SÉLECTION
-=========================================================
-*/
+/* =========================
+   SCORE API
+========================= */
 
-function calculateSelectionScore(
-  probabilities,
-  poissonData
+function getApiScore(
+  prediction
 ) {
+  const goals =
+    prediction
+      ?.predictions
+      ?.goals;
 
-  const apiBest =
-    probabilities
-      ? Math.max(
-          probabilities.home,
-          probabilities.draw,
-          probabilities.away
-        )
-      : 0;
-
-  const poissonBest =
-    Math.max(
-      poissonData.home,
-      poissonData.draw,
-      poissonData.away
-    );
-
-  /*
-   * La prédiction API est prioritaire.
-   */
-
-  if (probabilities) {
-
-    return clamp(
-      apiBest * 0.75 +
-      poissonBest * 0.25,
-      0,
-      100
-    );
+  if (!goals) {
+    return null;
   }
 
-  return clamp(
-    poissonBest,
-    0,
-    100
-  );
+  const home =
+    number(goals.home);
+
+  const away =
+    number(goals.away);
+
+  /*
+   * On refuse les valeurs
+   * qui ne sont pas des buts.
+   */
+
+  if (
+    home === null ||
+    away === null ||
+    home < 0 ||
+    away < 0 ||
+    home > 20 ||
+    away > 20 ||
+    !Number.isInteger(home) ||
+    !Number.isInteger(away)
+  ) {
+    return null;
+  }
+
+  return `${home}-${away}`;
 }
 
-/*
-=========================================================
-ANALYSE D'UN MATCH
-=========================================================
-*/
+/* =========================
+   BTTS
+========================= */
+
+function getBTTS(
+  prediction
+) {
+  const value =
+    prediction
+      ?.predictions
+      ?.under_over;
+
+  if (
+    typeof value !==
+    "string"
+  ) {
+    return "Non disponible";
+  }
+
+  const lower =
+    value.toLowerCase();
+
+  if (
+    lower.includes("yes") ||
+    lower.includes("oui")
+  ) {
+    return "Oui";
+  }
+
+  if (
+    lower.includes("no") ||
+    lower.includes("non")
+  ) {
+    return "Non";
+  }
+
+  return "Non disponible";
+}
+
+/* =========================
+   UNDER / OVER
+========================= */
+
+function getUnderOver(
+  prediction,
+  poissonData
+) {
+  const value =
+    prediction
+      ?.predictions
+      ?.under_over;
+
+  if (
+    typeof value ===
+    "string"
+  ) {
+
+    const lower =
+      value.toLowerCase();
+
+    if (
+      lower.includes("2.5") &&
+      (
+        lower.includes("under") ||
+        lower.includes("moins")
+      )
+    ) {
+      return "Moins de 2.5";
+    }
+
+    if (
+      lower.includes("2.5") &&
+      (
+        lower.includes("over") ||
+        lower.includes("plus")
+      )
+    ) {
+      return "Plus de 2.5";
+    }
+  }
+
+  const total =
+    poissonData.homeLambda +
+    poissonData.awayLambda;
+
+  return total >= 2.5
+    ? "Plus de 2.5"
+    : "Moins de 2.5";
+}
+
+/* =========================
+   ANALYSE
+========================= */
 
 async function analyzeFixture(
   fixture
 ) {
+  const fixtureId =
+    fixture.fixture?.id;
 
   const home =
     fixture.teams?.home;
@@ -469,20 +566,17 @@ async function analyzeFixture(
   const away =
     fixture.teams?.away;
 
-  const fixtureId =
-    fixture.fixture?.id;
-
   if (
     !fixtureId ||
-    !home?.id ||
-    !away?.id
+    !home ||
+    !away
   ) {
     return null;
   }
 
   /*
-   * UN SEUL appel API supplémentaire :
-   * /predictions
+   * UN SEUL appel supplémentaire
+   * par match.
    */
 
   const predictionResult =
@@ -493,8 +587,8 @@ async function analyzeFixture(
   const prediction =
     predictionResult.prediction;
 
-  const probabilities =
-    getProbabilities(
+  const apiProbabilities =
+    readApiProbabilities(
       prediction
     );
 
@@ -502,26 +596,32 @@ async function analyzeFixture(
     calculatePoisson();
 
   /*
-   * Probabilités finales.
+   * API prioritaire.
    */
 
-  const finalProbabilities =
-    probabilities || {
-      home: poissonData.home,
-      draw: poissonData.draw,
-      away: poissonData.away
+  const probabilities =
+    apiProbabilities || {
+      home:
+        poissonData.home,
+
+      draw:
+        poissonData.draw,
+
+      away:
+        poissonData.away
     };
 
   /*
-   * Vainqueur.
+   * Vainqueur API.
    */
 
-  let mainPick;
-
   const apiWinner =
-    prediction?.predictions?.winner?.name ||
-    prediction?.winner?.name ||
-    null;
+    prediction
+      ?.predictions
+      ?.winner
+      ?.name || null;
+
+  let mainPick;
 
   if (apiWinner) {
 
@@ -529,20 +629,20 @@ async function analyzeFixture(
       apiWinner;
 
   } else if (
-    finalProbabilities.home >=
-      finalProbabilities.draw &&
-    finalProbabilities.home >=
-      finalProbabilities.away
+    probabilities.home >=
+      probabilities.draw &&
+    probabilities.home >=
+      probabilities.away
   ) {
 
     mainPick =
       home.name;
 
   } else if (
-    finalProbabilities.away >=
-      finalProbabilities.home &&
-    finalProbabilities.away >=
-      finalProbabilities.draw
+    probabilities.away >=
+      probabilities.home &&
+    probabilities.away >=
+      probabilities.draw
   ) {
 
     mainPick =
@@ -555,26 +655,17 @@ async function analyzeFixture(
   }
 
   /*
-   * Score API.
+   * Score.
    */
 
-  const apiGoals =
-    prediction?.predictions?.goals ||
-    prediction?.goals ||
-    null;
+  const apiScore =
+    getApiScore(
+      prediction
+    );
 
-  let predictedScore =
+  const predictedScore =
+    apiScore ||
     poissonData.score;
-
-  if (
-    apiGoals &&
-    apiGoals.home !== undefined &&
-    apiGoals.away !== undefined
-  ) {
-
-    predictedScore =
-      `${num(apiGoals.home)}-${num(apiGoals.away)}`;
-  }
 
   /*
    * Confiance.
@@ -582,23 +673,20 @@ async function analyzeFixture(
 
   const confidence =
     Math.max(
-      finalProbabilities.home,
-      finalProbabilities.draw,
-      finalProbabilities.away
+      probabilities.home,
+      probabilities.draw,
+      probabilities.away
     );
 
   /*
-   * Sélection.
+   * Score de sélection.
    */
 
   const selectionScore =
-    calculateSelectionScore(
-      probabilities,
-      poissonData
-    );
+    confidence;
 
   /*
-   * Qualité.
+   * Qualité des données.
    */
 
   let dataQuality = 0;
@@ -607,7 +695,7 @@ async function analyzeFixture(
     dataQuality += 70;
   }
 
-  if (probabilities) {
+  if (apiProbabilities) {
     dataQuality += 30;
   }
 
@@ -616,51 +704,44 @@ async function analyzeFixture(
    */
 
   const btts =
-    prediction?.predictions?.under_over ||
-    prediction?.predictions?.goals?.under_over ||
-    "Non disponible";
+    getBTTS(
+      prediction
+    );
 
   /*
    * Under / Over.
    */
 
-  let underOver =
-    prediction?.predictions?.under_over ||
-    prediction?.under_over ||
-    null;
+  const underOver =
+    getUnderOver(
+      prediction,
+      poissonData
+    );
 
-  if (!underOver) {
-
-    const total =
-      poissonData.homeLambda +
-      poissonData.awayLambda;
-
-    underOver =
-      total >= 2.5
-        ? "Over 2.5"
-        : "Under 2.5";
-  }
+  /*
+   * Conseil.
+   */
 
   let advice;
 
   if (
-    dataQuality >= 100
+    dataQuality === 100
   ) {
 
     advice =
-      "Analyse API complète";
+      "Analyse basée sur la prédiction API + Poisson";
 
   } else if (
     dataQuality >= 70
   ) {
 
     advice =
-      "Analyse basée sur la prédiction API";
+      "Prédiction API disponible, données complémentaires limitées";
 
   } else {
 
     advice =
-      "Données API limitées";
+      "Données insuffisantes";
   }
 
   return {
@@ -719,31 +800,31 @@ async function analyzeFixture(
       probabilities: {
 
         v1:
-          finalProbabilities.home
+          probabilities.home
             .toFixed(1) +
           "%",
 
         draw:
-          finalProbabilities.draw
+          probabilities.draw
             .toFixed(1) +
           "%",
 
         v2:
-          finalProbabilities.away
+          probabilities.away
             .toFixed(1) +
           "%",
 
         "1x":
           (
-            finalProbabilities.home +
-            finalProbabilities.draw
+            probabilities.home +
+            probabilities.draw
           ).toFixed(1) +
           "%",
 
         x2:
           (
-            finalProbabilities.draw +
-            finalProbabilities.away
+            probabilities.draw +
+            probabilities.away
           ).toFixed(1) +
           "%"
       },
@@ -755,7 +836,8 @@ async function analyzeFixture(
         predictedScore,
 
       exact_score_probability:
-        poissonData.scoreProbability
+        poissonData
+          .scoreProbability
           .toFixed(1) +
         "%",
 
@@ -764,13 +846,16 @@ async function analyzeFixture(
         "Non disponible",
 
       win_or_draw:
-        "Non disponible",
+        (
+          probabilities.home +
+          probabilities.draw
+        ).toFixed(1) +
+        "%",
 
       under_over:
         underOver,
 
-      btts:
-        btts,
+      btts,
 
       halftime_score:
         "Non disponible",
@@ -781,8 +866,7 @@ async function analyzeFixture(
       yellow_cards:
         "Non disponible",
 
-      advice:
-        advice
+      advice
     },
 
     analysis: {
@@ -818,7 +902,9 @@ async function analyzeFixture(
         Boolean(prediction),
 
       api_probabilities_available:
-        Boolean(probabilities),
+        Boolean(
+          apiProbabilities
+        ),
 
       data_sources: {
 
@@ -840,17 +926,17 @@ async function analyzeFixture(
           predictionResult.error,
 
         recent_form:
-          "Le paramètre last est indisponible sur le plan API actuel",
+          "Non disponible avec le plan API actuel",
 
         h2h:
-          "Non demandé afin de respecter la limite de requêtes"
+          "Non demandé afin de respecter la limite API"
       },
 
       seasons_used:
         false,
 
       engine:
-        "API prediction + poisson"
+        "Prédiction API + Poisson"
     },
 
     available:
@@ -858,76 +944,79 @@ async function analyzeFixture(
   };
 }
 
-/*
-=========================================================
-RACINE
-=========================================================
-*/
+/* =========================
+   ROUTE RACINE
+========================= */
 
-app.get("/", (req, res) => {
+app.get(
+  "/",
+  (req, res) => {
 
-  res.json({
+    res.json({
 
-    success: true,
+      success: true,
 
-    status: "ok",
+      status: "ok",
 
-    service:
-      "BOT PREDICTOR",
+      service:
+        "BOT PREDICTOR",
 
-    prediction_engine:
-      "API prediction + poisson",
+      prediction_engine:
+        "Prédiction API + Poisson",
 
-    candidates_requested:
-      MAX_CANDIDATES,
+      candidates_requested:
+        CANDIDATES,
 
-    displayed:
-      MAX_DISPLAYED,
+      displayed:
+        DISPLAYED,
 
-    api_key_configured:
-      Boolean(API_KEY),
+      api_key_configured:
+        Boolean(API_KEY),
 
-    rate_limit_protection:
-      true,
+      rate_limit_protection:
+        true,
 
-    message:
-      "Serveur opérationnel"
-  });
-});
+      message:
+        "Serveur opérationnel"
+    });
+  }
+);
 
-/*
-=========================================================
-HEALTH
-=========================================================
-*/
+/* =========================
+   HEALTH
+========================= */
 
-app.get("/health", (req, res) => {
+app.get(
+  "/health",
+  (req, res) => {
 
-  res.json({
+    res.json({
 
-    success: true,
+      success: true,
 
-    status: "ok",
+      status: "ok",
 
-    api_key_configured:
-      Boolean(API_KEY),
+      service:
+        "BOT PREDICTOR",
 
-    candidates:
-      MAX_CANDIDATES,
+      api_key_configured:
+        Boolean(API_KEY),
 
-    displayed:
-      MAX_DISPLAYED,
+      candidates_requested:
+        CANDIDATES,
 
-    rate_limit_protection:
-      true
-  });
-});
+      displayed:
+        DISPLAYED,
 
-/*
-=========================================================
-PREDICTIONS
-=========================================================
-*/
+      rate_limit_protection:
+        true
+    });
+  }
+);
+
+/* =========================
+   PRÉDICTIONS
+========================= */
 
 async function predictionsHandler(
   req,
@@ -938,43 +1027,40 @@ async function predictionsHandler(
 
     if (!API_KEY) {
 
-      return res.status(500).json({
+      return res.status(500)
+        .json({
 
-        success: false,
+          success: false,
 
-        error:
-          "API_FOOTBALL_KEY manquante dans Render"
-      });
+          error:
+            "API_FOOTBALL_KEY manquante dans Render"
+        });
     }
 
     /*
      * Récupération des matchs.
-     *
-     * Cette requête est mise en cache
-     * pendant 60 secondes.
      */
 
     const fixtures =
-      await getTodayFixtures();
+      await getFixtures();
 
     /*
-     * Maximum 7 candidats.
+     * 7 candidats maximum.
      */
 
     const candidates =
       fixtures.slice(
         0,
-        MAX_CANDIDATES
+        CANDIDATES
       );
 
     const analyzed = [];
 
     /*
      * IMPORTANT :
+     * appels séquentiels.
      *
-     * Les appels sont séquentiels.
-     * On attend entre les appels afin
-     * de ne pas dépasser la limite.
+     * 7 secondes entre les appels.
      */
 
     for (
@@ -983,14 +1069,11 @@ async function predictionsHandler(
       i++
     ) {
 
-      const fixture =
-        candidates[i];
-
       try {
 
         const result =
           await analyzeFixture(
-            fixture
+            candidates[i]
           );
 
         if (result) {
@@ -999,16 +1082,11 @@ async function predictionsHandler(
 
       } catch (error) {
 
-        console.log(
-          "Analyse ignorée :",
-          fixture.fixture?.id,
+        console.error(
+          "Erreur analyse match:",
           error.message
         );
       }
-
-      /*
-       * Petite pause entre les appels.
-       */
 
       if (
         i <
@@ -1021,25 +1099,29 @@ async function predictionsHandler(
 
     /*
      * Classement.
+     *
+     * Priorité :
+     * 1. qualité des données
+     * 2. score de sélection
      */
 
     analyzed.sort(
       (a, b) => {
 
         if (
-          b.analysis.selection_score !==
-          a.analysis.selection_score
+          b.analysis.data_quality !==
+          a.analysis.data_quality
         ) {
 
           return (
-            b.analysis.selection_score -
-            a.analysis.selection_score
+            b.analysis.data_quality -
+            a.analysis.data_quality
           );
         }
 
         return (
-          b.analysis.data_quality -
-          a.analysis.data_quality
+          b.analysis.selection_score -
+          a.analysis.selection_score
         );
       }
     );
@@ -1048,13 +1130,13 @@ async function predictionsHandler(
      * Seulement les 2 meilleurs.
      */
 
-    const topTwo =
+    const top =
       analyzed.slice(
         0,
-        MAX_DISPLAYED
+        DISPLAYED
       );
 
-    topTwo.forEach(
+    top.forEach(
       (item, index) => {
 
         item.analysis.rank =
@@ -1067,38 +1149,38 @@ async function predictionsHandler(
         .toISOString()
         .slice(0, 10);
 
-    res.json({
+    return res.json({
 
       success: true,
 
       status: "ok",
 
       prediction_engine:
-        "API prediction + poisson",
+        "Prédiction API + Poisson",
 
       candidates_requested:
-        MAX_CANDIDATES,
+        CANDIDATES,
 
       candidates_analyzed:
         analyzed.length,
 
       predictions:
-        topTwo.length,
+        top.length,
 
       displayed:
-        topTwo.length,
+        top.length,
 
       selection:
-        "Top 2 after complete analysis",
+        "Top 2 après analyse complète",
 
       rate_limit_protection:
         true,
 
       matches:
-        topTwo,
+        top,
 
       recent_matches:
-        "Non disponible sur le plan API actuel",
+        "Non disponible avec le plan API actuel",
 
       seasons_used:
         false,
@@ -1113,21 +1195,20 @@ async function predictionsHandler(
       error
     );
 
-    res.status(500).json({
+    return res.status(500)
+      .json({
 
-      success: false,
+        success: false,
 
-      error:
-        error.message
-    });
+        error:
+          error.message
+      });
   }
 }
 
-/*
-=========================================================
-ROUTES
-=========================================================
-*/
+/* =========================
+   ROUTES API
+========================= */
 
 app.get(
   "/predictions",
@@ -1139,11 +1220,9 @@ app.get(
   predictionsHandler
 );
 
-/*
-=========================================================
-START
-=========================================================
-*/
+/* =========================
+   SERVEUR
+========================= */
 
 app.listen(
   PORT,
@@ -1169,16 +1248,12 @@ app.listen(
 
     console.log(
       "CANDIDATS:",
-      MAX_CANDIDATES
+      CANDIDATES
     );
 
     console.log(
       "AFFICHAGE:",
-      MAX_DISPLAYED
-    );
-
-    console.log(
-      "LAST PARAMETER: DISABLED"
+      DISPLAYED
     );
 
     console.log(

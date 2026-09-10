@@ -1,0 +1,57 @@
+import joblib
+import numpy as np
+import pandas as pd
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+# Initialisation de l'application FastAPI
+app = FastAPI(
+    title="Bot Predictor FIFA API",
+    description="API de prédiction de matchs FIFA via XGBoost",
+    version="1.0",
+)
+
+
+# Structure des données reçues pour la prédiction
+class MatchInput(BaseModel):
+  features: list[float]  # Liste des caractéristiques numériques pour le modèle
+
+
+# Chargement du modèle entraîné (assurez-vous d'avoir mis votre fichier .pkl dans le dépôt si nécessaire, ou l'API gèrera l'absence)
+try:
+  model = joblib.load("model_xgb.pkl")
+except Exception:
+  model = None
+
+
+@app.get("/")
+def home():
+  return {
+      "status": "online",
+      "message": "Bienvenue sur l'API de prédiction FIFA!",
+  }
+
+
+@app.post("/predict")
+def predict(data: MatchInput):
+  if model is None:
+    raise HTTPException(
+        status_code=500, detail="Modèle XGBoost non trouvé sur le serveur."
+    )
+
+  try:
+    # Transformation des données pour XGBoost
+    X = np.array(data.features).reshape(1, -1)
+    prediction = model.predict(X)
+    probability = (
+        model.predict_proba(X).tolist()
+        if hasattr(model, "predict_proba")
+        else None
+    )
+
+    return {
+        "prediction": int(prediction[0]),
+        "probabilities": probability,
+    }
+  except Exception as e:
+    raise HTTPException(status_code=400, detail=str(e))

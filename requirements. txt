@@ -1,7 +1,0 @@
-fastapi
-uvicorn
-xgboost
-joblib
-numpy
-pandas
-pydantic

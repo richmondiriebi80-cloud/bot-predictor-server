@@ -28,17 +28,14 @@ def run_xgboost_decision_tree(match: dict) -> dict:
     margin_over25 = 0.20
     reasons = []
 
-    # Règle 1 : Cadence de frappe
     if shots_per_min >= 2.0:
         margin_over25 += 1.35
         reasons.append(f"Rythme élevé : {shots_per_min:.1f} tirs/min")
 
-    # Règle 2 : Historique des 5 derniers matchs
     if avg_hist_goals >= 3.5:
         margin_over25 += 1.10
         reasons.append(f"Historique 5 derniers matchs : {avg_hist_goals} buts/m")
 
-    # Règle 3 : Écart de score (pressing bot FIFA)
     if abs(home_score - away_score) >= 2:
         margin_over25 += 0.80
         reasons.append("Scénario pressing bot (écart ≥ 2)")

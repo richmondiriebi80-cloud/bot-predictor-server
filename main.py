@@ -1,4 +1,4 @@
-# Mettez à jour cette fonction dans votre main.py sur Render
+
 @app.post("/analyser-complet")
 def analyser_match(data: MatchInput):
     # Récupération des noms pour des logs ou de la logique conditionnelle

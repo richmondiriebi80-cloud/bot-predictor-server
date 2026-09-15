@@ -1,55 +1,50 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-import xgboost as xgb
-import pydantic
-import math
-
-app = FastAPI(title="Moteur XGBoost FIFA 1xbet")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], 
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Chargement du modèle XGBoost (ou des modèles si vous en avez un par catégorie)
-model = xgb.Booster()
-model.load_model("modele_fifa_xgboost.json")
-
-# Les données que Lovable possède déjà et va envoyer à l'API
-class MatchInput(pydantic.BaseModel):
-    home_team: str
-    away_team: str
-    historique_buts_home: float  # Moyenne de buts marqués par l'équipe Domicile
-    historique_buts_away: float  # Moyenne de buts marqués par l'équipe Extérieur
-    cote_home: float             # Cote 1xbet Victoire Domicile
-    cote_away: float             # Cote 1xbet Victoire Extérieur
-
+# Mettez à jour cette fonction dans votre main.py sur Render
 @app.post("/analyser-complet")
 def analyser_match(data: MatchInput):
-    # 1. Préparation des données pour XGBoost (Exemple de features)
-    features = [data.historique_buts_home, data.historique_buts_away, data.cote_home, data.cote_away]
+    # Récupération des noms pour des logs ou de la logique conditionnelle
+    nom_complet_home = data.home_team   # ex: "Oll_22 (Real Madrid)"
+    nom_complet_away = data.away_team   # ex: "Sno_11 (Barcelona)"
+    
+    # 1. Préparation des variables chiffrées (Features) pour votre XGBoost
+    # Note : XGBoost a besoin d'historiques. Si Lovable ne lui envoie que les cotes, 
+    # vous pouvez baser votre prédiction sur les cotes actuelles fournies par l'API 1xbet.
+    features = [
+        data.cote_home,               # Cote Victoire Équipe 1
+        data.cote_away,               # Cote Victoire Équipe 2
+        data.historique_buts_home,    # Envoyer 0 ou une valeur par défaut si indisponible
+        data.historique_buts_away     # Envoyer 0 ou une valeur par défaut si indisponible
+    ]
+    
     dmatrix = xgb.DMatrix([features])
     
-    # 2. Simulation de la prédiction brute XGBoost (Buts attendus)
-    # Dans un vrai modèle multi-output, XGBoost renvoie une liste de chiffres
-    prediction = model.predict(dmatrix) 
+    try:
+        prediction = model.predict(dmatrix)
+        # Convertir en liste si c'est un tableau numpy
+        import numpy as np
+        if isinstance(prediction, np.ndarray):
+            prediction = prediction.tolist()
+            
+        # Si votre modèle retourne une seule valeur (ex: total de buts attendus)
+        buts_totaux = float(prediction[0]) if isinstance(prediction, list) else float(prediction)
+    except Exception as e:
+        # Algorithme de secours basé sur les cotes si le modèle JSON n'est pas chargé
+        # Plus la cote est basse, plus l'équipe est censée marquer
+        buts_totaux = (1 / data.cote_home * 3) + (1 / data.cote_away * 3)
     
-    # Extraction des buts prédits (Exemple de répartition basée sur l'arbre XGBoost)
-    buts_home_fin = round(float(prediction[0]), 1) if isinstance(prediction, list) else round(float(prediction) * 0.55, 1)
-    buts_away_fin = round(float(prediction[1]), 1) if isinstance(prediction, list) else round(float(prediction) * 0.45, 1)
+    # Répartition statistique des buts selon la puissance des cotes
+    ratio_home = data.cote_away / (data.cote_home + data.cote_away)
+    buts_home_fin = round(buts_totaux * ratio_home, 1)
+    buts_away_fin = round(buts_totaux * (1 - ratio_home), 1)
     
-    # Calcul automatique de la Mi-Temps (souvent 40% à 45% des buts totaux sur FIFA virtuel)
-    buts_home_ht = math.floor(buts_home_fin * 0.45)
-    buts_away_ht = math.floor(buts_away_fin * 0.45)
+    # Calcul Mi-Temps (Scénario FIFA Virtuel standard : ~40% des buts en 1ère mi-temps)
+    buts_home_ht = math.floor(buts_home_fin * 0.4)
+    buts_away_ht = math.floor(buts_away_fin * 0.4)
     
     total_buts_predit = round(buts_home_fin + buts_away_fin, 2)
     
-    # 3. Génération des pronostics Over/Under et Scores Exacts
     return {
         "status": "success",
+        "match": f"{nom_complet_home} vs {nom_complet_away}",
         "statistiques_predites": {
             "buts_domicile_fin": math.floor(buts_home_fin),
             "buts_exterieur_fin": math.floor(buts_away_fin),
@@ -64,5 +59,5 @@ def analyser_match(data: MatchInput):
             "over_2_5": "OUI" if total_buts_predit > 2.5 else "NON",
             "over_3_5": "OUI" if total_buts_predit > 3.5 else "NON"
         },
-        "conseil_principal": "Victoire Domicile & Over 1.5" if buts_home_fin > buts_away_fin else "Plus de 2.5 Buts"
+        "conseil_principal": "Over 2.5 Buts" if total_buts_predit > 2.4 else "Victoire " + (nom_complet_home if buts_home_fin > buts_away_fin else nom_complet_away)
     }

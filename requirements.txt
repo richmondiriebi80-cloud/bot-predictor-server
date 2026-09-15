@@ -2,3 +2,4 @@ fastapi
 uvicorn
 xgboost
 pydantic
+requests

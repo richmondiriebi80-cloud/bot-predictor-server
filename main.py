@@ -1,12 +1,14 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import xgboost as xgb
 import pydantic
 import math
 import os
+import requests
 
 app = FastAPI(title="Moteur XGBoost FIFA 1xbet Multi-Marchés")
 
+# Configuration CORS pour autoriser Lovable à communiquer avec l'API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -15,13 +17,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Chargement sécurisé du modèle XGBoost
+# Chargement sécurisé du modèle XGBoost (anti-crash si absent)
 model = xgb.Booster()
 if os.path.exists("modele_fifa_xgboost.json"):
     model.load_model("modele_fifa_xgboost.json")
+    print("Modèle XGBoost chargé avec succès !")
 else:
     print("Mode simulation activé.")
 
+# Définition de la structure des données reçues pour l'analyse
 class MatchInput(pydantic.BaseModel):
     home_team: str
     away_team: str
@@ -30,6 +34,21 @@ class MatchInput(pydantic.BaseModel):
     cote_home: float
     cote_away: float
 
+# --- ROUTE RELAIS RECOMMANDÉE POUR CONTOURNER LE CORS 1XBET ---
+@app.get("/flux-1xbet")
+def get_flux_1xbet():
+    url = "https://1xbet.com"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération 1xBet : {str(e)}")
+
+# --- ROUTE PRINCIPALE D'ANALYSE PAR SCRIPT XGBOOST ---
 @app.post("/analyser-complet")
 def analyser_match(data: MatchInput):
     nom_complet_home = data.home_team   
@@ -46,10 +65,10 @@ def analyser_match(data: MatchInput):
             prediction = prediction.tolist()
         buts_totaux = float(prediction) if isinstance(prediction, list) else float(prediction)
     except Exception:
-        # Algorithme de secours si le fichier JSON est vierge
+        # Algorithme de secours si le fichier JSON est vierge ou absent
         buts_totaux = (1 / data.cote_home * 3) + (1 / data.cote_away * 3)
     
-    # Distribution des buts
+    # Distribution statistique des buts
     ratio_home = data.cote_away / (data.cote_home + data.cote_away) if (data.cote_home + data.cote_away) > 0 else 0.5
     buts_home_fin = round(buts_totaux * ratio_home, 1)
     buts_away_fin = round(buts_totaux * (1 - ratio_home), 1)

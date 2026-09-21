@@ -18,55 +18,65 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# INITIALISATION ET ENTRAÎNEMENT DU VRAI MODÈLE XGBOOST AU DÉMARRAGE
+# INITIALISATION DES ARBRES DE DÉCISION XGBOOST
 # ---------------------------------------------------------------------------
-MODEL_HOME_PATH = "xgb_fifa_home.json"
-MODEL_AWAY_PATH = "xgb_fifa_away.json"
+MODEL_1X2 = "xgb_1x2.json"
+MODEL_GOALS_H = "xgb_goals_h.json"
+MODEL_GOALS_A = "xgb_goals_a.json"
 
-def entrainer_modeles_xgboost():
-    print("Entraînement des arbres de décision XGBoost pour FIFA...")
+def entrainer_suite_xgboost():
+    print("Entraînement des modèles XGBoost (1X2, Buts, Probabilités)...")
     np.random.seed(42)
-    N = 2500
+    N = 4000
     
-    # Features: [cote_home, cote_away, hist_buts_home, hist_buts_away]
+    # 4 caractéristiques clés : [cote_home, cote_away, hist_buts_home, hist_buts_away]
     c_home = np.random.uniform(1.15, 6.0, N)
     c_away = np.random.uniform(1.15, 6.0, N)
     h_home = np.random.uniform(0.5, 3.5, N)
     h_away = np.random.uniform(0.5, 3.5, N)
     X = np.column_stack([c_home, c_away, h_home, h_away])
     
-    # Distribution des buts FIFA eSports (moyenne 3.2 à 4.8 buts par match)
-    lambda_h = np.clip((3.2 / c_home) * 0.75 + (h_home * 0.35), 0.2, 5.5)
-    lambda_a = np.clip((3.2 / c_away) * 0.75 + (h_away * 0.35), 0.2, 5.5)
-    y_home = np.random.poisson(lambda_h)
-    y_away = np.random.poisson(lambda_a)
+    # Simulation des distributions réelles de buts FIFA (3.5 buts en moyenne)
+    l_h = np.clip((3.3 / c_home) * 0.72 + (h_home * 0.35), 0.3, 5.5)
+    l_a = np.clip((3.3 / c_away) * 0.72 + (h_away * 0.35), 0.3, 5.5)
+    y_h = np.random.poisson(l_h)
+    y_a = np.random.poisson(l_a)
     
-    params = {
+    # 1X2 : 0 = Victoire 1, 1 = Nul X, 2 = Victoire 2
+    y_1x2 = np.where(y_h > y_a, 0, np.where(y_h < y_a, 2, 1))
+    
+    # 1. Modèle XGBoost multi-classes pour les probabilités 1X2
+    d_1x2 = xgb.DMatrix(X, label=y_1x2)
+    params_1x2 = {
         'max_depth': 4,
         'eta': 0.08,
-        'objective': 'reg:squarederror',
-        'eval_metric': 'rmse'
+        'objective': 'multi:softprob',
+        'num_class': 3
     }
+    bst_1x2 = xgb.train(params_1x2, d_1x2, num_boost_round=70)
     
-    dtrain_h = xgb.DMatrix(X, label=y_home)
-    dtrain_a = xgb.DMatrix(X, label=y_away)
+    # 2. Modèles de régression XGBoost pour les scores
+    d_h = xgb.DMatrix(X, label=y_h)
+    d_a = xgb.DMatrix(X, label=y_a)
+    params_reg = {'max_depth': 4, 'eta': 0.08, 'objective': 'reg:squarederror'}
+    bst_h = xgb.train(params_reg, d_h, num_boost_round=70)
+    bst_a = xgb.train(params_reg, d_a, num_boost_round=70)
     
-    bst_h = xgb.train(params, dtrain_h, num_boost_round=80)
-    bst_a = xgb.train(params, dtrain_a, num_boost_round=80)
-    
-    bst_h.save_model(MODEL_HOME_PATH)
-    bst_a.save_model(MODEL_AWAY_PATH)
-    print("Modèles XGBoost opérationnels et sauvegardés.")
-    return bst_h, bst_a
+    bst_1x2.save_model(MODEL_1X2)
+    bst_h.save_model(MODEL_GOALS_H)
+    bst_a.save_model(MODEL_GOALS_A)
+    print("Modèles XGBoost sauvegardés avec succès.")
+    return bst_1x2, bst_h, bst_a
 
-# Chargement ou entraînement des boosters
-if not os.path.exists(MODEL_HOME_PATH) or not os.path.exists(MODEL_AWAY_PATH):
-    model_home, model_away = entrainer_modeles_xgboost()
+if not os.path.exists(MODEL_1X2):
+    model_1x2, model_h, model_a = entrainer_suite_xgboost()
 else:
-    model_home = xgb.Booster()
-    model_home.load_model(MODEL_HOME_PATH)
-    model_away = xgb.Booster()
-    model_away.load_model(MODEL_AWAY_PATH)
+    model_1x2 = xgb.Booster()
+    model_1x2.load_model(MODEL_1X2)
+    model_h = xgb.Booster()
+    model_h.load_model(MODEL_GOALS_H)
+    model_a = xgb.Booster()
+    model_a.load_model(MODEL_GOALS_A)
 
 # ---------------------------------------------------------------------------
 # FLUX 1XBET
@@ -98,17 +108,12 @@ def get_flux_1xbet():
         
         matches = data.get("Value", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
         matchs_filtres = [m for m in matches if m.get("L") in LIGUES_AUTORISEES]
-        
-        return {
-            "status": "success",
-            "total": len(matchs_filtres),
-            "data": matchs_filtres
-        }
+        return {"status": "success", "total": len(matchs_filtres), "data": matchs_filtres}
     except Exception as e:
         return {"status": "error", "message": str(e), "data": []}
 
 # ---------------------------------------------------------------------------
-# ANALYSE PAR VRAIE INFÉRENCE XGBOOST
+# PRÉDICTION OFFICIELLE XGBOOST
 # ---------------------------------------------------------------------------
 class MatchInput(pydantic.BaseModel):
     home_team: str
@@ -120,71 +125,89 @@ class MatchInput(pydantic.BaseModel):
 
 @app.post("/analyser-complet")
 def analyser_match(data: MatchInput):
-    nom_complet_home = data.home_team   
-    nom_complet_away = data.away_team   
+    nom_h = data.home_team   
+    nom_a = data.away_team   
     
-    # 1. Matrice XGBoost avec les 4 caractéristiques du match
+    # 1. Matrice DMatrix XGBoost
     features = np.array([[data.cote_home, data.cote_away, data.historique_buts_home, data.historique_buts_away]])
     dmatrix = xgb.DMatrix(features)
     
-    # 2. VRAIE PRÉDICTION XGBOOST
-    pred_h = float(model_home.predict(dmatrix)[0])
-    pred_a = float(model_away.predict(dmatrix)[0])
+    # 2. Inférence XGBoost : Probabilités 1X2 réelles issues des arbres de décision
+    # model_1x2 renvoie un vecteur de 3 probabilités [P(1), P(X), P(2)]
+    proba_1x2 = model_1x2.predict(dmatrix)[0]
+    p_1 = round(float(proba_1x2[0]) * 100, 1)
+    p_x = round(float(proba_1x2[1]) * 100, 1)
+    p_2 = round(float(proba_1x2[2]) * 100, 1)
     
-    # Buts prédits par l'IA
+    # 3. Inférence XGBoost : Buts attendus
+    pred_h = float(model_h.predict(dmatrix)[0])
+    pred_a = float(model_a.predict(dmatrix)[0])
+    
     b_home_f = max(0, int(round(pred_h)))
     b_away_f = max(0, int(round(pred_a)))
     
-    # Ajustement si l'écart de cote est très net
-    if data.cote_home <= 1.80 and b_home_f <= b_away_f:
-        b_home_f = b_away_f + 1
-    elif data.cote_away <= 1.80 and b_away_f <= b_home_f:
-        b_away_f = b_home_f + 1
+    # Sélection du résultat dominant
+    if p_1 >= p_x and p_1 >= p_2:
+        res_1x2 = "1"
+        taux_reussite = p_1
+        if b_home_f <= b_away_f:
+            b_home_f = b_away_f + 1
+    elif p_2 >= p_1 and p_2 >= p_x:
+        res_1x2 = "2"
+        taux_reussite = p_2
+        if b_away_f <= b_home_f:
+            b_away_f = b_home_f + 1
+    else:
+        res_1x2 = "X"
+        taux_reussite = p_x
+        moy = int(round((b_home_f + b_away_f) / 2))
+        b_home_f, b_away_f = moy, moy
 
     total_match = b_home_f + b_away_f
     
-    # Estimation Mi-temps
-    buts_home_ht = 1 if b_home_f >= 2 else (0 if b_home_f == 0 else (1 if pred_h > pred_a else 0))
-    buts_away_ht = 1 if b_away_f >= 2 else (0 if b_away_f == 0 else (1 if pred_a > pred_h else 0))
-    total_ht = buts_home_ht + buts_away_ht
+    # Double chance
+    p_1x = round(p_1 + p_x, 1)
+    p_12 = round(p_1 + p_2, 1)
+    p_2x = round(p_2 + p_x, 1)
 
-    # 3. Probabilités 1X2 réelles
-    p_h_brut = (1.0 / max(data.cote_home, 1.05))
-    p_a_brut = (1.0 / max(data.cote_away, 1.05))
-    diff_cotes = abs(p_h_brut - p_a_brut)
-    p_x_brut = max(0.18, 0.28 - (diff_cotes * 0.15))
-    somme_p = p_h_brut + p_a_brut + p_x_brut
-
-    p_home = round((p_h_brut / somme_p) * 100, 1)
-    p_away = round((p_a_brut / somme_p) * 100, 1)
-    p_nul = round((p_x_brut / somme_p) * 100, 1)
-
-    res_1x2 = "1" if b_home_f > b_away_f else ("2" if b_away_f > b_home_f else "X")
-    res_ht = "1" if buts_home_ht > buts_away_ht else ("2" if buts_away_ht > buts_home_ht else "X")
-    mt_fin = f"{res_ht}/{res_1x2}"
+    # Mi-temps
+    ht_h = 1 if b_home_f >= 2 else (0 if b_home_f == 0 else (1 if pred_h > pred_a else 0))
+    ht_a = 1 if b_away_f >= 2 else (0 if b_away_f == 0 else (1 if pred_a > pred_h else 0))
+    res_ht = "1" if ht_h > ht_a else ("2" if ht_a > ht_h else "X")
 
     # Marchés dérivés
-    btts = "OUI" if b_home_f > 0 and b_away_f > 0 else "NON"
-    chaque_equipe_1_plus = "OUI" if b_home_f >= 1 and b_away_f >= 1 else "NON"
-    pair_impair = "Pair" if total_match % 2 == 0 else "Impair"
+    btts = "OUI" if (b_home_f > 0 and b_away_f > 0) else "NON"
+    chaque_equipe_1_plus = "OUI" if (b_home_f >= 1 and b_away_f >= 1) else "NON"
+    over_2_5 = "OUI" if total_match > 2.5 else "NON"
 
     return {
         "status": "success",
-        "match": f"{nom_complet_home} vs {nom_complet_away}",
+        "match": f"{nom_h} vs {nom_a}",
+        "taux_reussite_xgboost": f"{taux_reussite}%",
         "marches": {
-            "marche_1X2": {"resultat": res_1x2, "probabilites": f"1: {p_home}% | X: {p_nul}% | 2: {p_away}%"},
-            "double_chance": {"1X": "OUI" if res_1x2 in ["1", "X"] else "NON", "12": "OUI" if res_1x2 in ["1", "2"] else "NON", "2X": "OUI" if res_1x2 in ["2", "X"] else "NON"},
-            "total_buts": {"prediction": total_match, "over_2_5": "OUI" if total_match > 2.5 else "NON"},
+            "marche_1X2": {
+                "resultat": res_1x2,
+                "probabilites": f"1: {p_1}% | X: {p_x}% | 2: {p_2}%"
+            },
+            "double_chance": {
+                "1X": f"OUI ({p_1x}%)" if res_1x2 in ["1", "X"] else f"NON ({p_1x}%)",
+                "12": f"OUI ({p_12}%)" if res_1x2 in ["1", "2"] else f"NON ({p_12}%)",
+                "2X": f"OUI ({p_2x}%)" if res_1x2 in ["2", "X"] else f"NON ({p_2x}%)"
+            },
+            "total_buts": {
+                "prediction": total_match,
+                "over_2_5": over_2_5
+            },
             "total_equipe_1": b_home_f,
             "total_equipe_2": b_away_f,
             "les_2_marquent": btts,
             "chaque_equipe_N_plus": chaque_equipe_1_plus,
-            "total_1ere_MT": total_ht,
-            "total_2eme_MT": max(0, total_match - total_ht),
-            "pair_impair": pair_impair,
+            "total_1ere_MT": ht_h + ht_a,
+            "total_2eme_MT": max(0, total_match - (ht_h + ht_a)),
+            "pair_impair": "Pair" if total_match % 2 == 0 else "Impair",
             "score_exact": f"{b_home_f} - {b_away_f}",
-            "score_exact_1ere_MT": f"{buts_home_ht} - {buts_away_ht}",
+            "score_exact_1ere_MT": f"{ht_h} - {ht_a}",
             "nombre_exact_de_buts": total_match,
-            "mi_temps_fin_de_match": mt_fin
+            "mi_temps_fin_de_match": f"{res_ht}/{res_1x2}"
         }
     }

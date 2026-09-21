@@ -4,11 +4,11 @@ import xgboost as xgb
 import pydantic
 import math
 import os
-import requests
+import httpx
 
 app = FastAPI(title="Moteur XGBoost FIFA 1xbet Multi-Marchés")
 
-# Configuration CORS pour autoriser Lovable à communiquer avec l'API
+# Configuration CORS pour Lovable
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -17,7 +17,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Chargement sécurisé du modèle XGBoost (anti-crash si absent)
+# Ligues FIFA ciblées
+LIGUES_AUTORISEES = [
+    "FC 26. England Championship",
+    "FC 26. Champions League",
+    "FC 26. Championnat du monde",
+    "FC 25. Italy Championship",
+    "FC 25. Ligue européenne",
+    "FC 26. Germany Championship",
+    "FC 26. Spain Championship",
+]
+
+URL_1XBET = "https://1xbet.com/service-api/LiveFeed/Get1x2_VZip?sports=85&count=120&lng=fr&mode=4&virtualSports=true"
+
+# Chargement sécurisé du modèle XGBoost
 model = xgb.Booster()
 if os.path.exists("modele_fifa_xgboost.json"):
     model.load_model("modele_fifa_xgboost.json")
@@ -25,7 +38,6 @@ if os.path.exists("modele_fifa_xgboost.json"):
 else:
     print("Mode simulation activé.")
 
-# Définition de la structure des données reçues pour l'analyse
 class MatchInput(pydantic.BaseModel):
     home_team: str
     away_team: str
@@ -34,19 +46,35 @@ class MatchInput(pydantic.BaseModel):
     cote_home: float
     cote_away: float
 
-# --- ROUTE RELAIS RECOMMANDÉE POUR CONTOURNER LE CORS 1XBET ---
+# --- VOTRE ROUTE RELAIS FILTRÉE AVEC HTTPX ---
 @app.get("/flux-1xbet")
-def get_flux_1xbet():
-    url = "https://1xbet.com"
+async def recuperer_flux_1xbet():
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
     }
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        return response.json()
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(URL_1XBET, headers=headers)
+            if response.status_code != 200:
+                raise HTTPException(status_code=502, detail="Erreur de réponse du fournisseur 1xBet")
+            
+            data = response.json()
+            valeurs = data.get("Value", [])
+            
+            # Filtrage selon vos compétitions
+            matchs_filtres = [
+                m for m in valeurs 
+                if any(ligue.lower() in m.get("L", "").lower() for ligue in LIGUES_AUTORISEES)
+            ]
+            
+            return {
+                "status": "success",
+                "total": len(matchs_filtres),
+                "data": matchs_filtres
+            }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération 1xBet : {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération : {str(e)}")
 
 # --- ROUTE PRINCIPALE D'ANALYSE PAR SCRIPT XGBOOST ---
 @app.post("/analyser-complet")
@@ -54,7 +82,6 @@ def analyser_match(data: MatchInput):
     nom_complet_home = data.home_team   
     nom_complet_away = data.away_team   
     
-    # 1. Préparation des variables
     features = [data.cote_home, data.cote_away, data.historique_buts_home, data.historique_buts_away]
     dmatrix = xgb.DMatrix([features])
     
@@ -65,25 +92,19 @@ def analyser_match(data: MatchInput):
             prediction = prediction.tolist()
         buts_totaux = float(prediction) if isinstance(prediction, list) else float(prediction)
     except Exception:
-        # Algorithme de secours si le fichier JSON est vierge ou absent
         buts_totaux = (1 / data.cote_home * 3) + (1 / data.cote_away * 3)
     
-    # Distribution statistique des buts
     ratio_home = data.cote_away / (data.cote_home + data.cote_away) if (data.cote_home + data.cote_away) > 0 else 0.5
     buts_home_fin = round(buts_totaux * ratio_home, 1)
     buts_away_fin = round(buts_totaux * (1 - ratio_home), 1)
     
-    # Calcul Mi-Temps (~40% des buts totaux du match)
     buts_home_ht = math.floor(buts_home_fin * 0.4)
     buts_away_ht = math.floor(buts_away_fin * 0.4)
     
-    # Arrondis pour scores exacts
     b_home_f = math.floor(buts_home_fin)
     b_away_f = math.floor(buts_away_fin)
     total_match = b_home_f + b_away_f
     total_ht = buts_home_ht + buts_away_ht
-    
-    # --- LOGIQUE D'ANALYSE DES MARCHÉS ---
     
     # 1X2 & Double Chance
     tendances = {"1": 1 / data.cote_home, "X": 0.25, "2": 1 / data.cote_away}
@@ -93,15 +114,9 @@ def analyser_match(data: MatchInput):
     p_nul = round((tendances["X"] / total_tendance) * 100, 1)
     
     res_1x2 = "1" if b_home_f > b_away_f else ("2" if b_away_f > b_home_f else "X")
-    
-    # Les 2 marquent & Chaque équipe N+
     btts = "OUI" if b_home_f > 0 and b_away_f > 0 else "NON"
     chaque_equipe_1_plus = "OUI" if b_home_f >= 1 and b_away_f >= 1 else "NON"
-    
-    # Pair / Impair
     pair_impair = "Pair" if total_match % 2 == 0 else "Impair"
-    
-    # MT / Fin de match
     res_ht = "1" if buts_home_ht > buts_away_ht else ("2" if buts_away_ht > buts_home_ht else "X")
     mt_fin = f"{res_ht}/{res_1x2}"
 

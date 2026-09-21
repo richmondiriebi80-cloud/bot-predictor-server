@@ -50,7 +50,8 @@ LIGUES_AUTORISEES = [
     "FC 26. Spain Championship",
 ]
 
-URL_1XBET = "https://1xbet.com/service-api/LiveFeed/Get1x2_VZip?sports=85&count=120&lng=fr&mode=4&virtualSports=true"
+# URL avec miroir 1xbet.ci (débloque l'erreur 403)
+URL_1XBET = "https://1xbet.ci/service-api/LiveFeed/Get1x2_VZip?sports=85&count=120&lng=fr&mode=4&virtualSports=true"
 
 # 5. Route pour récupérer le flux 1xbet
 @app.get("/flux-1xbet")
@@ -58,8 +59,9 @@ def recuperer_flux_1xbet():
     req = urllib.request.Request(
         URL_1XBET,
         headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "fr-FR,fr;q=0.9",
         }
     )
     try:
@@ -89,6 +91,7 @@ def analyser_match(data: MatchInput):
     nom_complet_home = data.home_team   
     nom_complet_away = data.away_team   
     
+    # 1. Préparation des variables
     features = [data.cote_home, data.cote_away, data.historique_buts_home, data.historique_buts_away]
     dmatrix = xgb.DMatrix([features])
     
@@ -100,18 +103,22 @@ def analyser_match(data: MatchInput):
     except Exception:
         buts_totaux = (1 / data.cote_home * 3) + (1 / data.cote_away * 3)
     
+    # Distribution des buts
     ratio_home = data.cote_away / (data.cote_home + data.cote_away) if (data.cote_home + data.cote_away) > 0 else 0.5
     buts_home_fin = round(buts_totaux * ratio_home, 1)
     buts_away_fin = round(buts_totaux * (1 - ratio_home), 1)
     
+    # Calcul Mi-Temps (~40% des buts totaux du match)
     buts_home_ht = math.floor(buts_home_fin * 0.4)
     buts_away_ht = math.floor(buts_away_fin * 0.4)
     
+    # Arrondis pour scores exacts
     b_home_f = math.floor(buts_home_fin)
     b_away_f = math.floor(buts_away_fin)
     total_match = b_home_f + b_away_f
     total_ht = buts_home_ht + buts_away_ht
     
+    # --- LOGIQUE D'ANALYSE DES MARCHÉS ---
     tendances = {"1": 1 / data.cote_home, "X": 0.25, "2": 1 / data.cote_away}
     total_tendance = sum(tendances.values())
     p_home = round((tendances["1"] / total_tendance) * 100, 1)
@@ -119,6 +126,7 @@ def analyser_match(data: MatchInput):
     p_nul = round((tendances["X"] / total_tendance) * 100, 1)
     
     res_1x2 = "1" if b_home_f > b_away_f else ("2" if b_away_f > b_home_f else "X")
+    
     btts = "OUI" if b_home_f > 0 and b_away_f > 0 else "NON"
     chaque_equipe_1_plus = "OUI" if b_home_f >= 1 and b_away_f >= 1 else "NON"
     pair_impair = "Pair" if total_match % 2 == 0 else "Impair"

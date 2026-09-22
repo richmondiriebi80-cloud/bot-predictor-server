@@ -18,6 +18,21 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
+# ROUTE D'ACCUEIL (Évite l'erreur 404 dans les logs Render)
+# ---------------------------------------------------------------------------
+@app.get("/")
+def racine():
+    return {
+        "status": "online",
+        "message": "Moteur XGBoost FIFA 1xbet opérationnel",
+        "endpoints": {
+            "flux": "/flux-1xbet",
+            "analyse": "/analyser-complet",
+            "documentation": "/docs"
+        }
+    }
+
+# ---------------------------------------------------------------------------
 # INITIALISATION DES ARBRES DE DÉCISION XGBOOST
 # ---------------------------------------------------------------------------
 MODEL_1X2 = "xgb_1x2.json"
@@ -133,7 +148,6 @@ def analyser_match(data: MatchInput):
     dmatrix = xgb.DMatrix(features)
     
     # 2. Inférence XGBoost : Probabilités 1X2 réelles issues des arbres de décision
-    # model_1x2 renvoie un vecteur de 3 probabilités [P(1), P(X), P(2)]
     proba_1x2 = model_1x2.predict(dmatrix)[0]
     p_1 = round(float(proba_1x2[0]) * 100, 1)
     p_x = round(float(proba_1x2[1]) * 100, 1)

@@ -1,214 +1,233 @@
-import os
-import math
+import os, math, json
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import requests
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List, Dict
+from typing import Optional
 import xgboost as xgb
+from sklearn.metrics import brier_score_loss, log_loss
 
-app = FastAPI(title="FIFA Live Predictor Server", version="2.0.0")
+app = FastAPI(title="FIFA Predictor Honest v3", version="3.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+MODEL_FILE  = "fifa_xgb_honest.json"
+META_FILE   = "fifa_xgb_meta.json"
+REPORT_FILE = "backtest_report.json"
 
-MODEL_FILE = "fifa_xgboost_power.json"
 model_xgb = None
+model_meta = {"reliable": False, "roi_estimated": None}
 
-# URL de l'API de votre application Lovable pour lire l'historique enregistré
-LOVABLE_APP_URL = "https://project--224d7604-2d70-4dbf-aa1c-88ec751727d6.lovable.app"
+# ⚠️ REMPLACE CETTE URL PAR CELLE DE TON APP LOVABLE
+LOVABLE_EXPORT = "https://project--224d7604-2d70-4dbf-aa1c-88ec751727d6.lovable.app/api/public/hooks/collect-results" 
 
-# -------------------------------------------------------------
-# 1. Chargement du modèle XGBoost au démarrage
-# -------------------------------------------------------------
+# ---------- Chargement ----------
 def charger_modele():
-    global model_xgb
-    if os.path.exists(MODEL_FILE):
+    global model_xgb, model_meta
+    if os.path.exists(MODEL_FILE) and os.path.exists(META_FILE):
         try:
-            m = xgb.XGBClassifier()
-            m.load_model(MODEL_FILE)
-            model_xgb = m
-            print(f" Modèle {MODEL_FILE} chargé avec succès.")
+            model_meta = json.load(open(META_FILE))
+            if model_meta.get("reliable"):
+                m = xgb.XGBClassifier(); m.load_model(MODEL_FILE)
+                model_xgb = m
+                print(f"✅ Modèle chargé (ROI backtest = {model_meta.get('roi_estimated')})")
+            else:
+                print("⚠️ Modèle présent mais NON fiable — ignoré.")
         except Exception as e:
-            print(f"⚠️ Erreur de chargement du modèle : {e}")
-            model_xgb = None
-    else:
-        print("ℹ️ Aucun modèle pré-entraîné trouvé. L'entraînement initial est requis via /reentrainer.")
-
+            print(f"Erreur chargement : {e}")
 charger_modele()
 
-# -------------------------------------------------------------
-# 2. Modèles de données Pydantic (compatibles avec l'app web)
-# -------------------------------------------------------------
+# ---------- Pydantic ----------
 class AnalyseRequest(BaseModel):
     home_team: str
     away_team: str
-    historique_buts_home: Optional[float] = 1.5
-    historique_buts_away: Optional[float] = 1.5
-    cote_home: Optional[float] = 2.0
-    cote_away: Optional[float] = 2.0
+    cote_home: float
+    cote_draw: float
+    cote_away: float
+    cote_over25: Optional[float] = None
+    cote_under25: Optional[float] = None
 
-# -------------------------------------------------------------
-# 3. Moteur Poisson Mathématique pour les scores et les marchés
-# -------------------------------------------------------------
-def calculer_poisson(lambda_h: float, mu_a: float, max_goals: int = 7):
-    """Calcule la matrice bivariée des probabilités de score."""
-    matrice = np.zeros((max_goals, max_goals))
-    for i in range(max_goals):
-        p_i = (lambda_h ** i * math.exp(-lambda_h)) / math.factorial(i)
-        for j in range(max_goals):
-            p_j = (mu_a ** j * math.exp(-mu_a)) / math.factorial(j)
-            matrice[i, j] = p_i * p_j
-    return matrice
+# ---------- Utils ----------
+def devig_3way(oh, od, oa):
+    ph, pd_, pa = 1/oh, 1/od, 1/oa
+    s = ph + pd_ + pa
+    return ph/s, pd_/s, pa/s
 
-# -------------------------------------------------------------
-# 4. Route principale appelée par l'application : /analyser-complet
-# -------------------------------------------------------------
+# ---------- Prédiction : refuse si modèle non fiable ----------
 @app.post("/analyser-complet")
-def analyser_complet(req: AnalyseRequest):
-    # Calcul des probabilités implicites dé-viggées à partir des cotes
-    p_home_raw = 1.0 / max(req.cote_home, 1.05)
-    p_away_raw = 1.0 / max(req.cote_away, 1.05)
-    total_p = p_home_raw + p_away_raw
-    p_home = p_home_raw / total_p
-    p_away = p_away_raw / total_p
+def analyser(req: AnalyseRequest):
+    p_h, p_d, p_a = devig_3way(req.cote_home, req.cote_draw, req.cote_away)
 
-    # Espérances de buts réelles (xG)
-    # Pondération : 60% historique réel enregistré + 40% estimation par les cotes
-    lambda_h = round(req.historique_buts_home * 0.6 + (p_home * 3.2) * 0.4, 2)
-    mu_a = round(req.historique_buts_away * 0.6 + (p_away * 2.8) * 0.4, 2)
-    total_estime = round(lambda_h + mu_a, 2)
+    if model_xgb is None or not model_meta.get("reliable"):
+        return {
+            "status": "refused",
+            "message": "❌ Modèle non fiable — backtest non concluant. NE MISEZ PAS.",
+            "raison": model_meta.get("reason", "Pas de backtest positif"),
+            "probabilites_marche": {"1": round(p_h*100,1), "X": round(p_d*100,1), "2": round(p_a*100,1)}
+        }
 
-    # Inférence XGBoost si le modèle est présent
-    taux_confiance = 72
-    if model_xgb is not None:
-        try:
-            # VRAIES FEATURES : [cote_home, cote_away, xG_home, xG_away, total_xG, diff_xG]
-            features = np.array([[req.cote_home, req.cote_away, lambda_h, mu_a, total_estime, lambda_h - mu_a]])
-            proba = model_xgb.predict_proba(features)[0]
-            # Prend la confiance maximale de la classe prédite
-            taux_confiance = int(max(proba) * 100)
-        except Exception as e:
-            print(f"Erreur inférence XGBoost : {e}")
+    feats = np.array([[req.cote_home, req.cote_draw, req.cote_away,
+                       req.cote_over25 or 1.9, req.cote_under25 or 1.9,
+                       p_h, p_d, p_a,
+                       np.log(req.cote_home/req.cote_away),
+                       1/req.cote_home + 1/req.cote_draw + 1/req.cote_away]])
+    p_over = float(model_xgb.predict_proba(feats)[0][1])
+    p_mkt = (1/req.cote_over25) if req.cote_over25 else None
+    edge = (p_over - p_mkt) if p_mkt else None
 
-    # Calcul de la matrice de Poisson
-    matrice = calculer_poisson(lambda_h, mu_a)
-
-    # Probabilités Over / Under
-    prob_o15 = float(np.sum(np.triu(matrice, 1) + np.tril(matrice, -1) + np.diag(np.diag(matrice)))) # somme totale
-    # Somme des scores où i + j > seuil
-    indices = np.indices(matrice.shape)
-    somme_buts = indices[0] + indices[1]
-    
-    p_over_15 = round(float(np.sum(matrice[somme_buts > 1])) * 100, 1)
-    p_over_25 = round(float(np.sum(matrice[somme_buts > 2])) * 100, 1)
-    p_over_35 = round(float(np.sum(matrice[somme_buts > 3])) * 100, 1)
-    p_btts = round(float(np.sum(matrice[1:, 1:])) * 100, 1)
-
-    # Top score exact
-    best_i, best_j = np.unravel_index(np.argmax(matrice), matrice.shape)
-    score_exact = f"{best_i}-{best_j}"
-    score_mt = f"{max(0, best_i // 2)}-{max(0, best_j // 2)}"
-
-    # Résultat 1X2 conseillé
-    if lambda_h > mu_a + 0.4:
-        choix_1x2 = f"{req.home_team} Victoire"
-        dc = f"{req.home_team} ou Nul (1X)"
-    elif mu_a > lambda_h + 0.4:
-        choix_1x2 = f"{req.away_team} Victoire"
-        dc = f"{req.away_team} ou Nul (X2)"
-    else:
-        choix_1x2 = "Match Nul ou Équilibré"
-        dc = "12 (Pas de match nul)"
+    reco = "Pas de pari (edge insuffisant)"
+    if edge is not None and edge > 0.04:
+        reco = f"VALUE sur OVER 2.5 (edge {edge*100:+.1f}%)"
+    elif edge is not None and edge < -0.04:
+        reco = f"VALUE sur UNDER 2.5 (edge {-edge*100:+.1f}%)"
 
     return {
         "status": "success",
-        "match": f"{req.home_team} vs {req.away_team}",
-        "taux": taux_confiance,
-        "taux_reussite_xgboost": f"{taux_confiance}%",
-        "marches": {
-            "marche_1X2": {"resultat": choix_1x2, "cote_estimee": 1.75},
-            "double_chance": dc,
-            "total_buts": {
-                "prediction": "Plus de 2.5 buts" if p_over_25 >= 55 else "Moins de 2.5 buts",
-                "total_estime": total_estime,
-                "over_1_5": p_over_15,
-                "over_2_5": p_over_25,
-                "over_3_5": p_over_35
-            },
-            "total_equipe_1": lambda_h,
-            "total_equipe_2": mu_a,
-            "les_deux_marquent": "Oui" if p_btts >= 52 else "Non",
-            "scores_exacts": {
-                "fin_match": score_exact,
-                "mi_temps": score_mt
-            }
-        }
+        "p_modele_over25": f"{p_over*100:.1f}%",
+        "p_marche_over25": f"{p_mkt*100:.1f}%" if p_mkt else "N/A",
+        "edge": f"{edge*100:+.1f}%" if edge is not None else "N/A",
+        "recommandation": reco,
+        "meta": model_meta
     }
 
-# -------------------------------------------------------------
-# 5. Route d'entraînement autonome : /reentrainer
-# -------------------------------------------------------------
+# ---------- Pipeline d'entraînement et Backtest ----------
 @app.get("/reentrainer")
-def entrainer_sur_base_reelle(background_tasks: BackgroundTasks):
-    """Déclenche la récupération des vrais matchs Lovable et ré-entraîne XGBoost."""
-    background_tasks.add_task(executer_entrainement)
-    return {"message": "Entraînement XGBoost lancé en arrière-plan avec les données de la base."}
+def reentrainer(bt: BackgroundTasks):
+    bt.add_task(_pipeline)
+    return {"message": "Pipeline lancé. Consultez /rapport dans 1-2 min."}
 
-def executer_entrainement():
-    global model_xgb
-    print(" Démarrage de l'auto-entraînement...")
+def _pipeline():
+    global model_xgb, model_meta
     try:
-        # 1. Récupération des scores finaux enregistrés dans Lovable Cloud
-        res = requests.get(f"{LOVABLE_APP_URL}/api/public/hooks/collect-results", timeout=15)
-        # Note: vous pouvez également créer une route dédiée d'export si besoin
-        
-        # Exemple de simulation de dataset sur les scores pour créer les vrais arbres
-        # Target : 1 si Over 2.5 buts, 0 sinon
-        np.random.seed(42)
-        taille = 300
-        
-        # Features : [cote_home, cote_away, xG_h, xG_a, total_xG, diff_xG]
-        X = np.random.uniform(low=[1.2, 1.2, 0.5, 0.5, 1.5, -2.0], 
-                              high=[5.0, 5.0, 3.5, 3.5, 6.0, 2.0], 
-                              size=(taille, 6))
-        
-        # Règle logique du jeu virtuel FIFA : si total_xG > 2.7 -> forte chance d'Over 2.5
-        y = (X[:, 4] + np.random.normal(0, 0.4, taille) > 2.5).astype(int)
+        print("=== Export Lovable ===")
+        r = requests.get(LOVABLE_EXPORT, timeout=30)
+        r.raise_for_status()
+        df = pd.DataFrame(r.json())
+        if df.empty:
+            raise ValueError("Export vide (aucune donnée reçue de Lovable)")
 
-        # 2. Entraînement XGBoost
-        clf = xgb.XGBClassifier(
-            n_estimators=100,
-            max_depth=4,
-            learning_rate=0.08,
-            subsample=0.85,
-            objective="binary:logistic",
-            eval_metric="logloss"
+        # Normalise le nom des colonnes (adapte si ton export utilise d'autres noms)
+        rename = {
+            "homeScore": "score_home", "awayScore": "score_away",
+            "home_score": "score_home", "away_score": "score_away",
+            "coteHome": "cote_home_open", "coteDraw": "cote_draw_open", "coteAway": "cote_away_open",
+            "odds_home": "cote_home_open", "odds_draw": "cote_draw_open", "odds_away": "cote_away_open",
+        }
+        df = df.rename(columns={k:v for k,v in rename.items() if k in df.columns})
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["date","score_home","score_away"]).sort_values("date").reset_index(drop=True)
+        df["total"] = df.score_home + df.score_away
+        df["over25"] = (df.total > 2).astype(int)
+        print(f"{len(df)} matchs valides ({df.date.min()} → {df.date.max()})")
+
+        # Contrôle : les cotes existent-elles ?
+        cols_cotes = ["cote_home_open","cote_draw_open","cote_away_open","cote_over25_open","cote_under25_open"]
+        manquantes = [c for c in cols_cotes if c not in df.columns]
+        if manquantes:
+            raise ValueError(
+                f"❌ Colonnes de cotes manquantes : {manquantes}. "
+                "Modifie l'export Lovable pour inclure les cotes AVANT le match."
+            )
+
+        df["marge"] = 1/df.cote_home_open + 1/df.cote_draw_open + 1/df.cote_away_open
+        print(f"Marge bookmaker moy : {df.marge.mean()*100:.2f}%")
+        print(f"Taux réel Over 2.5  : {df.over25.mean()*100:.1f}%")
+
+        if len(df) < 500:
+            print(f"⚠️ Seulement {len(df)} matchs — conclusions fragiles.")
+
+        # Features
+        df["p_h"] = (1/df.cote_home_open) / df["marge"]
+        df["p_d"] = (1/df.cote_draw_open) / df["marge"]
+        df["p_a"] = (1/df.cote_away_open) / df["marge"]
+        df["log_ratio"] = np.log(df.cote_home_open / df.cote_away_open)
+
+        feats = ["cote_home_open","cote_draw_open","cote_away_open",
+                 "cote_over25_open","cote_under25_open",
+                 "p_h","p_d","p_a","log_ratio","marge"]
+        X = df[feats].values.astype(float)
+        y = df.over25.values.astype(int)
+
+        # Split chronologique 70/30
+        split = int(len(df)*0.7)
+        Xtr, Xte = X[:split], X[split:]
+        ytr, yte = y[:split], y[split:]
+        test = df.iloc[split:].copy()
+
+        clf = xgb.XGBClassifier(n_estimators=200, max_depth=3, learning_rate=0.05,
+                                 subsample=0.8, colsample_bytree=0.8,
+                                 objective="binary:logistic", eval_metric="logloss")
+        clf.fit(Xtr, ytr)
+
+        proba = clf.predict_proba(Xte)[:,1]
+        p_mkt_raw = (1/test.cote_over25_open).values
+        p_mkt_n = p_mkt_raw / (p_mkt_raw + (1/test.cote_under25_open).values)
+
+        brier_m = brier_score_loss(yte, proba)
+        brier_mkt = brier_score_loss(yte, p_mkt_n)
+        print(f"Brier modèle {brier_m:.4f} vs marché {brier_mkt:.4f}")
+
+        # ROI simulé (mise plate 1u, edge > 4%)
+        gains, n_bets = [], 0
+        for i, (_, r) in enumerate(test.iterrows()):
+            edge = proba[i] - p_mkt_n[i]
+            if edge > 0.04:
+                gains.append((r.cote_over25_open - 1) if r.over25==1 else -1); n_bets += 1
+            elif edge < -0.04:
+                gains.append((r.cote_under25_open - 1) if r.over25==0 else -1); n_bets += 1
+        roi = float(np.mean(gains)) if gains else None
+        print(f"ROI simulé : {roi*100:+.2f}% sur {n_bets} paris" if roi is not None else "Aucun pari généré")
+
+        # Baselines
+        baseline = {}
+        baseline["over_sys"] = float(np.mean(np.where(test.over25==1, test.cote_over25_open-1, -1)))
+        baseline["under_sys"] = float(np.mean(np.where(test.over25==0, test.cote_under25_open-1, -1)))
+        print(f"Baselines — Over sys {baseline['over_sys']*100:+.1f}%  Under sys {baseline['under_sys']*100:+.1f}%")
+
+        # Décision finale
+        reliable = (roi is not None and roi > 0.02 and brier_m < brier_mkt and n_bets >= 30)
+        reason = "OK" if reliable else (
+            f"ROI={roi*100:+.1f}% (min +2%)" if roi is not None and roi <= 0.02 else
+            f"Brier modèle {brier_m:.3f} ≥ marché {brier_mkt:.3f}" if brier_m >= brier_mkt else
+            f"Seulement {n_bets} paris testés (min 30)"
         )
-        clf.fit(X, y)
 
-        # 3. Sauvegarde sur le disque de Render
-        clf.save_model(MODEL_FILE)
-        model_xgb = clf
-        print(f" Auto-entraînement réussi ! Modèle sauvegardé dans {MODEL_FILE}")
+        meta = {
+            "reliable": bool(reliable), "reason": reason,
+            "n_train": split, "n_test": len(test),
+            "brier_modele": brier_m, "brier_marche": brier_mkt,
+            "roi_estimated": roi, "n_bets": n_bets,
+            "baselines": baseline,
+            "taux_reel_over25": float(df.over25.mean()),
+            "date": datetime.utcnow().isoformat()
+        }
+        json.dump(meta, open(REPORT_FILE,"w"), indent=2, default=str)
 
+        if reliable:
+            clf.save_model(MODEL_FILE)
+            model_xgb, model_meta = clf, meta
+            json.dump(meta, open(META_FILE,"w"), indent=2, default=str)
+            print("✅ MODÈLE DÉPLOYÉ")
+        else:
+            if os.path.exists(MODEL_FILE): os.remove(MODEL_FILE)
+            model_xgb = None; model_meta = meta
+            json.dump(meta, open(META_FILE,"w"), indent=2, default=str)
+            print(f"❌ MODÈLE NON DÉPLOYÉ — {reason}")
     except Exception as e:
-        print(f"❌ Erreur pendant l'entraînement : {e}")
+        print(f"❌ Pipeline : {e}")
+        model_meta = {"reliable": False, "reason": str(e)}
 
-# -------------------------------------------------------------
-# 6. Endpoint de santé
-# -------------------------------------------------------------
+# ---------- Rapport public ----------
+@app.get("/rapport")
+def rapport():
+    if not os.path.exists(REPORT_FILE):
+        return {"status": "no_report", "message": "Lance /reentrainer d'abord."}
+    return json.load(open(REPORT_FILE))
+
 @app.get("/")
-def health_check():
-    return {
-        "status": "online",
-        "model_loaded": model_xgb is not None,
-        "engine": "XGBoost + Poisson Bivarié FIFA"
-    }
+def health():
+    return {"status": "online", "model_deployed": model_xgb is not None,
+            "reliable": model_meta.get("reliable", False),
+            "roi": model_meta.get("roi_estimated")}

@@ -1,9 +1,18 @@
-fastapi==0.115.0
-uvicorn==0.30.6
-pydantic==2.9.2
-requests==2.32.3
-numpy==1.26.4
-pandas==2.2.3
-xgboost==2.1.1
-scikit-learn==1.5.2
-joblib==1.4.2
+# Outils de compilation (accélère l'installation des packages scientifiques)
+setuptools>=65.0.0
+wheel>=0.40.0
+
+# Serveur web
+fastapi
+uvicorn[standard]
+
+# Data & Machine Learning
+numpy
+pandas
+scikit-learn
+xgboost
+
+# Utilitaires
+pydantic
+requests
+joblib

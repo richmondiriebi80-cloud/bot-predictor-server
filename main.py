@@ -10,7 +10,7 @@ from typing import Optional, Dict
 import xgboost as xgb
 from sklearn.metrics import mean_squared_error
 
-app = FastAPI(title="FIFA Virtual - Full Probabilities", version="18.0.0")
+app = FastAPI(title="FIFA Predictor - Final Version", version="20.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 MODEL_FILE_H  = "fifa_xgb_home.json"
@@ -22,6 +22,7 @@ model_home = None
 model_away = None
 model_meta = {"reliable": False}
 
+# Les deux applications sont connectées ici
 LOVABLE_EXPORTS = [
     "https://goal-predictor-prov1.lovable.app/api/public/export-matches",
     "https://fifaliveprobet.lovable.app/api/public/export-matches"
@@ -35,6 +36,7 @@ def charger_modele():
             if model_meta.get("reliable"):
                 model_home = xgb.XGBRegressor(); model_home.load_model(MODEL_FILE_H)
                 model_away = xgb.XGBRegressor(); model_away.load_model(MODEL_FILE_A)
+                print("✅ Modèles xG chargés.")
         except Exception as e:
             print(f"Erreur chargement : {e}")
 charger_modele()
@@ -66,7 +68,7 @@ def poisson_matrix(lambda_h, mu_a, max_goals=10):
 
 @app.post("/analyser-complet")
 def analyser(req: AnalyseRequest):
-    c1, cx, c2 = req.cote_1, req.cote_x, req.cote_2
+    c1, cx, c2 = req.cote_1 or req.cote_home or 2.0, req.cote_x or req.cote_draw or 3.0, req.cote_2 or req.cote_away or 2.0
 
     if model_home is not None and model_meta.get("reliable"):
         feats = np.array([[c1, cx, c2, 1/c1 + 1/cx + 1/c2, np.log(c1/c2)]])
@@ -103,12 +105,14 @@ def analyser(req: AnalyseRequest):
         
     for seuil in [0.5, 1.5, 2.5]:
         probas[f"Eq1_O{seuil}"] = float(np.sum(mat[i > seuil])) * 100
+        probas[f"Eq1_U{seuil}"] = 100 - probas[f"Eq1_O{seuil}"]
         probas[f"Eq2_O{seuil}"] = float(np.sum(mat[j > seuil])) * 100
+        probas[f"Eq2_U{seuil}"] = 100 - probas[f"Eq2_O{seuil}"]
         probas[f"Chaque_Equipe_O{seuil}"] = float(np.sum(mat[(i > seuil) & (j > seuil)])) * 100
+        probas[f"Chaque_Equipe_U{seuil}"] = 100 - probas[f"Chaque_Equipe_O{seuil}"]
 
     probas["BTTS_Oui"] = float(np.sum(mat[1:, 1:])) * 100
     probas["BTTS_Non"] = 100 - probas["BTTS_Oui"]
-    
     probas["Pair"] = float(np.sum(mat[somme_buts % 2 == 0])) * 100
     probas["Impair"] = 100 - probas["Pair"]
     
@@ -116,35 +120,36 @@ def analyser(req: AnalyseRequest):
         probas[f"Exact_Goals_{k}"] = float(np.sum(mat[somme_buts == k])) * 100
 
     probas["MT1_O0.5"] = float(np.sum(mat_mt1[somme_mt1 > 0.5])) * 100
+    probas["MT1_O1.5"] = float(np.sum(mat_mt1[somme_mt1 > 1.5])) * 100
     probas["MT2_O0.5"] = float(np.sum(mat_mt2[somme_mt1 > 0.5])) * 100
-    probas["But_Chaque_MT_Oui"] = (probas["MT1_O0.5"] / 100) * (probas["MT2_O0.5"] / 100) * 100
+    probas["MT2_O1.5"] = float(np.sum(mat_mt2[somme_mt1 > 1.5])) * 100
     
-    # HT/FT
+    p_but_mt1 = probas["MT1_O0.5"] / 100
+    p_but_mt2 = probas["MT2_O0.5"] / 100
+    probas["But_Chaque_MT_Oui"] = (p_but_mt1 * p_but_mt2) * 100
+    probas["But_Chaque_MT_Non"] = 100 - probas["But_Chaque_MT_Oui"]
+
     mt1_res = {"1": float(np.sum(mat_mt1[i_mt1 > j_mt1])), "X": float(np.sum(mat_mt1[i_mt1 == j_mt1])), "2": float(np.sum(mat_mt1[i_mt1 < j_mt1]))}
     ft_res = {"1": probas["1"]/100, "X": probas["X"]/100, "2": probas["2"]/100}
     for h in ["1", "X", "2"]:
         for f in ["1", "X", "2"]:
             probas[f"HTFT_{h}_{f}"] = (mt1_res[h] * ft_res[f]) * 100
 
-    # Top Scores
     flat_indices = np.argsort(mat.ravel())[::-1][:3]
     top_scores = [{"score": f"{np.unravel_index(idx, mat.shape)[0]}-{np.unravel_index(idx, mat.shape)[1]}", "probabilite": round(float(mat[np.unravel_index(idx, mat.shape)])*100, 1)} for idx in flat_indices]
 
-    # On prépare les résultats pour TOUS les marchés demandés
-    resultats_marches = {}
     value_bets = []
+    resultats_marches = {}
     
     if req.cotes:
         for key, cote in req.cotes.items():
-            if key in probas and isinstance(probas[key], (int, float)):
+            if key in probas and isinstance(probas[key], (int, float)) and cote > 1.01:
                 p_ia = probas[key]
-                p_marche = (1 / cote) * 100 if cote > 1.01 else 0
+                p_marche = (1 / cote) * 100
                 edge = p_ia - p_marche
                 
-                # On ajoute le résultat à la liste globale
                 resultats_marches[key] = {"probabilite_ia": round(p_ia, 1), "cote": cote, "edge": round(edge, 1)}
                 
-                # Si c'est une faille, on l'ajoute aux value_bets
                 if edge > 3.0:
                     if key.startswith("U") and (not model_meta.get("reliable") or edge < 10.0):
                         continue
@@ -156,11 +161,10 @@ def analyser(req: AnalyseRequest):
         "status": "success",
         "predictions_ia": {"xg_home": round(xg_home, 2), "xg_away": round(xg_away, 2)},
         "top_scores_exacts": top_scores,
-        "resultats_marches": resultats_marches, # <--- TOUTES LES PROBABILITÉS ICI
+        "resultats_marches": resultats_marches,
         "value_bets": value_bets[:10] if value_bets else ["Aucun value bet détecté."]
     }
 
-# (Les routes /reentrainer, /rapport et /health restent identiques)
 @app.get("/reentrainer")
 def reentrainer(bt: BackgroundTasks):
     bt.add_task(_pipeline)
@@ -177,10 +181,12 @@ def _pipeline():
             except: pass
         if not dfs: raise ValueError("Aucune donnée.")
         df = pd.concat(dfs, ignore_index=True)
-        if "match_id" in df.columns: df = df.drop_duplicates(subset=["match_id"])
+        if "id" in df.columns: df = df.drop_duplicates(subset=["id"])
+        elif "match_id" in df.columns: df = df.drop_duplicates(subset=["match_id"])
 
-        rename = {"homeScore": "score_home", "awayScore": "score_away", "home_score": "score_home", "away_score": "score_away", "coteHome": "cote_home", "coteDraw": "cote_draw", "coteAway": "cote_away"}
+        rename = {"hs": "score_home", "as": "score_away", "home": "home_team", "away": "away_team", "homeScore": "score_home", "awayScore": "score_away", "home_score": "score_home", "away_score": "score_away", "coteHome": "cote_home", "coteDraw": "cote_draw", "coteAway": "cote_away"}
         df = df.rename(columns={k:v for k,v in rename.items() if k in df.columns})
+        
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date","score_home","score_away"]).sort_values("date").reset_index(drop=True)
         
@@ -224,6 +230,7 @@ def _pipeline():
 def rapport():
     return json.load(open(REPORT_FILE)) if os.path.exists(REPORT_FILE) else {"status": "no_report"}
 
-@app.get("/")
+# ⚠️ LA CORRECTION POUR UPTIMEROBOT EST ICI :
+@app.api_route("/", methods=["GET", "HEAD"])
 def health():
     return {"status": "online", "model_ready": model_home is not None}

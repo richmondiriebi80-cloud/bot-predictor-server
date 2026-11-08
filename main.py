@@ -10,7 +10,7 @@ from typing import Optional, Dict
 import xgboost as xgb
 from sklearn.metrics import mean_squared_error
 
-app = FastAPI(title="FIFA Predictor - Flexible", version="16.0.0")
+app = FastAPI(title="FIFA Virtual - High Scoring Fix", version="17.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 MODEL_FILE_H  = "fifa_xgb_home.json"
@@ -40,25 +40,16 @@ def charger_modele():
             print(f"Erreur chargement : {e}")
 charger_modele()
 
-# ⚠️ LE MODÈLE DE DONNÉES EST DEVENU ULTRA-TOLÉRANT
 class AnalyseRequest(BaseModel):
     home_team: Optional[str] = "Équipe A"
     away_team: Optional[str] = "Équipe B"
-    
-    # Accepte cote_1, cote_x, cote_2
     cote_1: Optional[float] = 2.0
     cote_x: Optional[float] = 3.0
     cote_2: Optional[float] = 2.0
-    
-    # Accepte aussi cote_home, cote_draw, cote_away (au cas où Lovable utilise ces noms)
-    cote_home: Optional[float] = None
-    cote_draw: Optional[float] = None
-    cote_away: Optional[float] = None
-    
     cotes: Optional[Dict[str, float]] = {}
     
     class Config:
-        extra = "allow" # Accepte n'importe quel autre champ sans planter
+        extra = "allow"
 
 def devig_3way(oh, od, oa):
     ph, pd_, pa = 1/oh, 1/od, 1/oa
@@ -76,22 +67,22 @@ def poisson_matrix(lambda_h, mu_a, max_goals=10):
 
 @app.post("/analyser-complet")
 def analyser(req: AnalyseRequest):
-    # On récupère les cotes avec tolérance (si cote_1 est vide, on prend cote_home)
-    c1 = req.cote_1 or req.cote_home or 2.0
-    cx = req.cote_x or req.cote_draw or 3.0
-    c2 = req.cote_2 or req.cote_away or 2.0
+    c1, cx, c2 = req.cote_1, req.cote_x, req.cote_2
 
     if model_home is not None and model_meta.get("reliable"):
         feats = np.array([[c1, cx, c2, 1/c1 + 1/cx + 1/c2, np.log(c1/c2)]])
         xg_home = float(model_home.predict(feats)[0])
         xg_away = float(model_away.predict(feats)[0])
     else:
+        # ⚠️ CORRECTION FIFA VIRTUEL : On booste les buts attendus de base
+        # Le virtuel marque en moyenne 4 à 5 buts par match.
         p_h, p_d, p_a = devig_3way(c1, cx, c2)
-        xg_home = 1.8 + (p_h * 1.5)
-        xg_away = 1.2 + (p_a * 1.5)
+        xg_home = 2.2 + (p_h * 1.5) # Minimum ~2.2 buts
+        xg_away = 1.8 + (p_a * 1.5) # Minimum ~1.8 buts
     
-    xg_home = max(1.2, xg_home)
-    xg_away = max(0.8, xg_away)
+    # Sécurité : On force un minimum de 2.2 et 1.8 (Total ~4 buts)
+    xg_home = max(2.2, xg_home)
+    xg_away = max(1.8, xg_away)
     
     mat = poisson_matrix(xg_home, xg_away, 10)
     mat_mt1 = poisson_matrix(xg_home*0.45, xg_away*0.45, 10)
@@ -105,39 +96,22 @@ def analyser(req: AnalyseRequest):
     probas["1"] = float(np.sum(mat[i > j])) * 100
     probas["X"] = float(np.sum(mat[i == j])) * 100
     probas["2"] = float(np.sum(mat[i < j])) * 100
-    probas["1X"] = probas["1"] + probas["X"]
-    probas["12"] = probas["1"] + probas["2"]
-    probas["X2"] = probas["X"] + probas["2"]
     
     for seuil in [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]:
         probas[f"O{seuil}"] = float(np.sum(mat[somme_buts > seuil])) * 100
         probas[f"U{seuil}"] = 100 - probas[f"O{seuil}"]
         
-    for seuil in [0.5, 1.5, 2.5]:
-        probas[f"Eq1_O{seuil}"] = float(np.sum(mat[i > seuil])) * 100
-        probas[f"Eq1_U{seuil}"] = 100 - probas[f"Eq1_O{seuil}"]
-        probas[f"Eq2_O{seuil}"] = float(np.sum(mat[j > seuil])) * 100
-        probas[f"Eq2_U{seuil}"] = 100 - probas[f"Eq2_O{seuil}"]
-
-    for seuil in [0.5, 1.5, 2.5]:
-        condition = (i > seuil) & (j > seuil)
-        probas[f"Chaque_Equipe_O{seuil}"] = float(np.sum(mat[condition])) * 100
-        probas[f"Chaque_Equipe_U{seuil}"] = 100 - probas[f"Chaque_Equipe_O{seuil}"]
-
     probas["BTTS_Oui"] = float(np.sum(mat[1:, 1:])) * 100
     probas["BTTS_Non"] = 100 - probas["BTTS_Oui"]
     
-    probas["Pair"] = float(np.sum(mat[somme_buts % 2 == 0])) * 100
-    probas["Impair"] = 100 - probas["Pair"]
-    
-    probas["MT1_O0.5"] = float(np.sum(mat_mt1[somme_mt1 > 0.5])) * 100
-    probas["MT1_O1.5"] = float(np.sum(mat_mt1[somme_mt1 > 1.5])) * 100
-    
-    p_but_mt1 = probas["MT1_O0.5"] / 100
-    p_but_mt2 = probas["MT1_O0.5"] / 100 
-    probas["But_Chaque_MT_Oui"] = (p_but_mt1 * p_but_mt2) * 100
-    probas["But_Chaque_MT_Non"] = 100 - probas["But_Chaque_MT_Oui"]
+    # Top scores exacts (On trie la matrice)
+    flat_indices = np.argsort(mat.ravel())[::-1][:3]
+    top_scores = []
+    for idx in flat_indices:
+        score_i, score_j = np.unravel_index(idx, mat.shape)
+        top_scores.append({"score": f"{score_i}-{score_j}", "probabilite": round(float(mat[score_i, score_j])*100, 1)})
 
+    # Value Bets (Avec sécurité Under)
     value_bets = []
     if req.cotes:
         for key, cote in req.cotes.items():
@@ -148,9 +122,7 @@ def analyser(req: AnalyseRequest):
                 
                 if edge > 3.0:
                     if key.startswith("U"):
-                        if not model_meta.get("reliable"):
-                            continue
-                        elif edge < 10.0:
+                        if not model_meta.get("reliable") or edge < 10.0:
                             continue
                     
                     value_bets.append({"marche": key, "proba_ia": round(p_ia, 1), "cote": cote, "edge": round(edge, 1)})
@@ -161,9 +133,17 @@ def analyser(req: AnalyseRequest):
         "status": "success",
         "match": f"{req.home_team} vs {req.away_team}",
         "predictions_ia": {"xg_home": round(xg_home, 2), "xg_away": round(xg_away, 2)},
+        "probabilites_buts": {
+            "over_1_5": round(probas["O1.5"], 1),
+            "over_2_5": round(probas["O2.5"], 1),
+            "over_3_5": round(probas["O3.5"], 1),
+            "btts_oui": round(probas["BTTS_Oui"], 1)
+        },
+        "top_scores_exacts": top_scores,
         "value_bets": value_bets[:10] if value_bets else ["Aucun value bet détecté."]
     }
 
+# (Le reste du code /reentrainer, /rapport et /health reste identique)
 @app.get("/reentrainer")
 def reentrainer(bt: BackgroundTasks):
     bt.add_task(_pipeline)
@@ -191,10 +171,10 @@ def _pipeline():
 
         for _, row in df.iterrows():
             h, a, sh, sa = row['home_team'], row['away_team'], row['score_home'], row['score_away']
-            hist_h_scored = np.mean([x[0] for x in team_history.get(h, [[2.0, 1.5]])[-5:]])
-            hist_h_conceded = np.mean([x[1] for x in team_history.get(h, [[2.0, 1.5]])[-5:]])
-            hist_a_scored = np.mean([x[0] for x in team_history.get(a, [[1.5, 2.0]])[-5:]])
-            hist_a_conceded = np.mean([x[1] for x in team_history.get(a, [[1.5, 2.0]])[-5:]])
+            hist_h_scored = np.mean([x[0] for x in team_history.get(h, [[2.5, 2.0]])[-5:]])
+            hist_h_conceded = np.mean([x[1] for x in team_history.get(h, [[2.5, 2.0]])[-5:]])
+            hist_a_scored = np.mean([x[0] for x in team_history.get(a, [[2.0, 2.5]])[-5:]])
+            hist_a_conceded = np.mean([x[1] for x in team_history.get(a, [[2.0, 2.5]])[-5:]])
             
             if pd.notna(row.get('cote_home')) and pd.notna(row.get('cote_away')):
                 try:

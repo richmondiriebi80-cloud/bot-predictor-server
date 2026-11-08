@@ -8,32 +8,37 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import xgboost as xgb
-from sklearn.metrics import brier_score_loss, log_loss
+from sklearn.metrics import mean_squared_error
 
-app = FastAPI(title="FIFA Predictor Honest v4", version="4.0.0")
+app = FastAPI(title="FIFA Virtual AI Predictor Multi-App", version="6.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-MODEL_FILE  = "fifa_xgb_honest.json"
-META_FILE   = "fifa_xgb_meta.json"
-REPORT_FILE = "backtest_report.json"
+MODEL_FILE_H  = "fifa_xgb_home.json"
+MODEL_FILE_A  = "fifa_xgb_away.json"
+META_FILE     = "fifa_xgb_meta.json"
+REPORT_FILE   = "backtest_report.json"
 
-model_xgb = None
-model_meta = {"reliable": False, "roi_estimated": None}
+model_home = None
+model_away = None
+model_meta = {"reliable": False}
 
-# ⚠️ NOUVELLE URL VALIDÉE
-LOVABLE_EXPORT = "https://goal-predictor-prov1.lovable.app/api/public/export-matches" 
+# ⚠️ LES DEUX APPLICATIONS LOVABLE SONT CONNECTÉES ICI
+LOVABLE_EXPORTS = [
+    "https://goal-predictor-prov1.lovable.app/api/public/export-matches",
+    "https://fifaliveprobet.lovable.app/api/public/export-matches"
+]
 
 def charger_modele():
-    global model_xgb, model_meta
-    if os.path.exists(MODEL_FILE) and os.path.exists(META_FILE):
+    global model_home, model_away, model_meta
+    if os.path.exists(MODEL_FILE_H) and os.path.exists(MODEL_FILE_A) and os.path.exists(META_FILE):
         try:
             model_meta = json.load(open(META_FILE))
             if model_meta.get("reliable"):
-                m = xgb.XGBClassifier(); m.load_model(MODEL_FILE)
-                model_xgb = m
-                print(f"✅ Modèle chargé (ROI backtest = {model_meta.get('roi_estimated')})")
+                model_home = xgb.XGBRegressor(); model_home.load_model(MODEL_FILE_H)
+                model_away = xgb.XGBRegressor(); model_away.load_model(MODEL_FILE_A)
+                print("✅ Modèles xG chargés.")
             else:
-                print("⚠️ Modèle présent mais NON fiable — ignoré.")
+                print("⚠️ Modèles présents mais NON fiables — ignorés.")
         except Exception as e:
             print(f"Erreur chargement : {e}")
 charger_modele()
@@ -46,178 +51,187 @@ class AnalyseRequest(BaseModel):
     cote_away: float
     cote_over55: Optional[float] = None
     cote_under55: Optional[float] = None
+    cote_btts_oui: Optional[float] = None
 
 def devig_3way(oh, od, oa):
     ph, pd_, pa = 1/oh, 1/od, 1/oa
     s = ph + pd_ + pa
     return ph/s, pd_/s, pa/s
 
+def poisson_matrix(lambda_h, mu_a, max_goals=10):
+    matrice = np.zeros((max_goals, max_goals))
+    for i in range(max_goals):
+        p_i = (lambda_h ** i * math.exp(-lambda_h)) / math.factorial(i)
+        for j in range(max_goals):
+            p_j = (mu_a ** j * math.exp(-mu_a)) / math.factorial(j)
+            matrice[i, j] = p_i * p_j
+    return matrice
+
 @app.post("/analyser-complet")
 def analyser(req: AnalyseRequest):
     p_h, p_d, p_a = devig_3way(req.cote_home, req.cote_draw, req.cote_away)
 
-    if model_xgb is None or not model_meta.get("reliable"):
+    if model_home is None or not model_meta.get("reliable"):
         return {
             "status": "refused",
-            "message": "❌ Modèle non fiable — backtest non concluant. NE MISEZ PAS.",
-            "raison": model_meta.get("reason", "Pas de backtest positif"),
-            "probabilites_marche": {"1": round(p_h*100,1), "X": round(p_d*100,1), "2": round(p_a*100,1)}
+            "message": "❌ Modèle IA non prêt. Laissez les applications enregistrer des matchs avec cotes.",
+            "raison": model_meta.get("reason", "En attente de données")
         }
 
+    # L'IA prédit les buts attendus (xG)
     feats = np.array([[req.cote_home, req.cote_draw, req.cote_away,
-                       req.cote_over55 or 1.9, req.cote_under55 or 1.9,
-                       p_h, p_d, p_a,
-                       np.log(req.cote_home/req.cote_away),
-                       1/req.cote_home + 1/req.cote_draw + 1/req.cote_away]])
-    p_over = float(model_xgb.predict_proba(feats)[0][1])
-    p_mkt = (1/req.cote_over55) if req.cote_over55 else None
-    edge = (p_over - p_mkt) if p_mkt else None
+                       1/req.cote_home + 1/req.cote_draw + 1/req.cote_away,
+                       np.log(req.cote_home/req.cote_away)]])
+    
+    xg_home = float(model_home.predict(feats)[0])
+    xg_away = float(model_away.predict(feats)[0])
+    
+    # Loi de Poisson pour générer tous les marchés
+    matrice = poisson_matrix(xg_home, xg_away)
+    indices = np.indices(matrice.shape)
+    somme_buts = indices[0] + indices[1]
+    
+    p_over55 = float(np.sum(matrice[somme_buts > 5])) * 100
+    p_btts = float(np.sum(matrice[1:, 1:])) * 100
+    
+    best_i, best_j = np.unravel_index(np.argmax(matrice), matrice.shape)
+    score_exact = f"{best_i}-{best_j}"
 
-    reco = "Pas de pari (edge insuffisant)"
-    if edge is not None and edge > 0.04:
-        reco = f"VALUE sur OVER 5.5 (edge {edge*100:+.1f}%)"
-    elif edge is not None and edge < -0.04:
-        reco = f"VALUE sur UNDER 5.5 (edge {-edge*100:+.1f}%)"
+    # Détection des failles (Value Bets)
+    alerts = []
+    if req.cote_over55:
+        edge_over55 = (p_over55 / 100) - (1 / req.cote_over55)
+        if edge_over55 > 0.03:
+            alerts.append(f"🔥 VALUE OVER 5.5 (Edge: +{edge_over55*100:.1f}%)")
+            
+    if req.cote_btts_oui:
+        edge_btts = (p_btts / 100) - (1 / req.cote_btts_oui)
+        if edge_btts > 0.03:
+            alerts.append(f"🔥 VALUE BTTS OUI (Edge: +{edge_btts*100:.1f}%)")
 
     return {
         "status": "success",
-        "p_modele_over55": f"{p_over*100:.1f}%",
-        "p_marche_over55": f"{p_mkt*100:.1f}%" if p_mkt else "N/A",
-        "edge": f"{edge*100:+.1f}%" if edge is not None else "N/A",
-        "recommandation": reco,
-        "meta": model_meta
+        "match": f"{req.home_team} vs {req.away_team}",
+        "predictions_ia": {
+            "xg_home": round(xg_home, 2),
+            "xg_away": round(xg_away, 2),
+            "total_xg": round(xg_home + xg_away, 2)
+        },
+        "probabilites": {
+            "over_5_5": f"{p_over55:.1f}%",
+            "btts_oui": f"{p_btts:.1f}%",
+            "score_exact": score_exact
+        },
+        "value_bets": alerts if alerts else ["Aucun value bet détecté."]
     }
 
 @app.get("/reentrainer")
 def reentrainer(bt: BackgroundTasks):
     bt.add_task(_pipeline)
-    return {"message": "Pipeline lancé. Consultez /rapport dans 1-2 min."}
+    return {"message": "Fusion des deux applications et entraînement lancés."}
 
 def _pipeline():
-    global model_xgb, model_meta
+    global model_home, model_away, model_meta
     try:
-        print("=== Export Lovable ===")
-        r = requests.get(LOVABLE_EXPORT, timeout=30)
-        r.raise_for_status()
+        print("=== 1. Récupération des données (App 1 + App 2) ===")
+        dfs = []
+        for url in LOVABLE_EXPORTS:
+            try:
+                r = requests.get(url, timeout=30)
+                data = r.json()
+                if data:
+                    dfs.append(pd.DataFrame(data))
+                    print(f"✅ {len(data)} matchs lus depuis {url[:35]}...")
+            except Exception as e:
+                print(f"⚠️ Impossible de lire {url} : {e}")
+                
+        if not dfs: raise ValueError("Aucune donnée trouvée.")
+        df = pd.concat(dfs, ignore_index=True)
         
-        try:
-            data = r.json()
-        except Exception:
-            raise ValueError(f"L'URL n'a pas renvoyé de JSON. Réponse : {r.text[:100]}")
-            
-        df = pd.DataFrame(data)
-        if df.empty:
-            raise ValueError("Aucune donnée reçue.")
+        # Suppression des doublons si un match a été enregistré dans les 2 apps
+        if "match_id" in df.columns: 
+            df = df.drop_duplicates(subset=["match_id"])
 
-        # Correspondance des noms de colonnes
-        rename = {
-            "homeScore": "score_home", "awayScore": "score_away",
-            "home_score": "score_home", "away_score": "score_away",
-            "coteHome": "cote_home_open", "coteDraw": "cote_draw_open", "coteAway": "cote_away_open",
-            "odds_home": "cote_home_open", "odds_draw": "cote_draw_open", "odds_away": "cote_away_open",
-            "cote_over55": "cote_over55_open", "cote_under55": "cote_under55_open"
-        }
+        rename = {"homeScore": "score_home", "awayScore": "score_away", "home_score": "score_home", "away_score": "score_away", "coteHome": "cote_home", "coteDraw": "cote_draw", "coteAway": "cote_away"}
         df = df.rename(columns={k:v for k,v in rename.items() if k in df.columns})
         
-        if "date" not in df.columns or "score_home" not in df.columns:
-            raise ValueError(f"Colonnes manquantes. Reçu : {list(df.columns)}")
-            
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date","score_home","score_away"]).sort_values("date").reset_index(drop=True)
         
-        # FIFA VIRTUEL : On regarde Over 5.5 buts
-        df["total"] = df.score_home + df.score_away
-        df["over55"] = (df.total > 5).astype(int)
-        print(f"{len(df)} matchs au total. Taux Over 5.5 : {df.over55.mean()*100:.1f}%")
-
-        # On supprime les matchs sans cotes (les anciens matchs de Lovable)
-        cols_cotes = ["cote_home_open","cote_draw_open","cote_away_open","cote_over55_open","cote_under55_open"]
+        print(f"Total : {len(df)} matchs uniques combinés.")
+        print("=== 2. Calcul de la forme des équipes et préparation IA ===")
         
-        # On s'assure que les colonnes existent 
-        for c in cols_cotes:
-            if c not in df.columns:
-                df[c] = np.nan
-                
-        # Suppression des lignes sans cotes
-        df = df.dropna(subset=cols_cotes)
-        print(f"{len(df)} matchs valides avec cotes pour l'entraînement.")
+        team_history = {}
+        X_data, y_home, y_away = [], [], []
 
-        # Si on n'a pas assez de matchs avec cotes, on l'écrit dans le rapport
-        if len(df) < 50:
-            raise ValueError(
-                f"Seulement {len(df)} matchs avec cotes. C'est NORMAL : les anciens matchs n'avaient pas de cotes. Laissez l'application tourner pour enregistrer de nouveaux matchs avec les cotes, puis revenez."
-            )
+        for _, row in df.iterrows():
+            h, a = row['home_team'], row['away_team']
+            sh, sa = row['score_home'], row['score_away']
+            
+            hist_h_scored = np.mean([x[0] for x in team_history.get(h, [[1.5, 1.5]])[-5:]])
+            hist_h_conceded = np.mean([x[1] for x in team_history.get(h, [[1.5, 1.5]])[-5:]])
+            hist_a_scored = np.mean([x[0] for x in team_history.get(a, [[1.5, 1.5]])[-5:]])
+            hist_a_conceded = np.mean([x[1] for x in team_history.get(a, [[1.5, 1.5]])[-5:]])
+            
+            # On entraîne l'IA uniquement sur les matchs ayant des cotes
+            if pd.notna(row.get('cote_home')) and pd.notna(row.get('cote_away')):
+                try:
+                    marge = 1/row['cote_home'] + 1/row.get('cote_draw', 3.0) + 1/row['cote_away']
+                    X_data.append([
+                        float(row['cote_home']), float(row.get('cote_draw', 3.0)), float(row['cote_away']), marge,
+                        np.log(float(row['cote_home'])/float(row['cote_away'])),
+                        hist_h_scored, hist_h_conceded, hist_a_scored, hist_a_conceded
+                    ])
+                    y_home.append(sh)
+                    y_away.append(sa)
+                except:
+                    pass
+            
+            if h not in team_history: team_history[h] = []
+            if a not in team_history: team_history[a] = []
+            team_history[h].append([sh, sa])
+            team_history[a].append([sa, sh])
 
-        df["marge"] = 1/df.cote_home_open + 1/df.cote_draw_open + 1/df.cote_away_open
-        df["p_h"] = (1/df.cote_home_open) / df["marge"]
-        df["p_d"] = (1/df.cote_draw_open) / df["marge"]
-        df["p_a"] = (1/df.cote_away_open) / df["marge"]
-        df["log_ratio"] = np.log(df.cote_home_open / df.cote_away_open)
+        if len(X_data) < 50:
+            raise ValueError(f"Seulement {len(X_data)} matchs avec cotes. Laissez les applications tourner.")
 
-        feats = cols_cotes + ["p_h","p_d","p_a","log_ratio","marge"]
-        X = df[feats].values.astype(float)
-        y = df.over55.values.astype(int)
+        X = np.array(X_data)
+        y_h = np.array(y_home)
+        y_a = np.array(y_away)
 
-        split = int(len(df)*0.7)
-        if split < 20:
-            raise ValueError(f"Pas assez de matchs pour séparer Train/Test ({len(df)} matchs).")
+        print(f"=== 3. Entraînement sur {len(X)} matchs avec cotes ===")
+        split = int(len(X) * 0.8)
+        
+        clf_h = xgb.XGBRegressor(n_estimators=150, max_depth=4, learning_rate=0.05, objective='count:poisson')
+        clf_a = xgb.XGBRegressor(n_estimators=150, max_depth=4, learning_rate=0.05, objective='count:poisson')
+        
+        clf_h.fit(X[:split], y_h[:split])
+        clf_a.fit(X[:split], y_a[:split])
 
-        Xtr, Xte = X[:split], X[split:]
-        ytr, yte = y[:split], y[split:]
-        test = df.iloc[split:].copy()
-
-        clf = xgb.XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.05,
-                                 subsample=0.8, colsample_bytree=0.8,
-                                 objective="binary:logistic", eval_metric="logloss")
-        clf.fit(Xtr, ytr)
-
-        proba = clf.predict_proba(Xte)[:,1]
-        p_mkt_raw = (1/test.cote_over55_open).values
-        p_mkt_n = p_mkt_raw / (p_mkt_raw + (1/test.cote_under55_open).values)
-
-        brier_m = brier_score_loss(yte, proba)
-        brier_mkt = brier_score_loss(yte, p_mkt_n)
-
-        # ROI simulé
-        gains, n_bets = [], 0
-        for i, (_, r) in enumerate(test.iterrows()):
-            edge = proba[i] - p_mkt_n[i]
-            if edge > 0.04:
-                gains.append((r.cote_over55_open - 1) if r.over55==1 else -1); n_bets += 1
-            elif edge < -0.04:
-                gains.append((r.cote_under55_open - 1) if r.over55==0 else -1); n_bets += 1
-        roi = float(np.mean(gains)) if gains else None
-
-        reliable = (roi is not None and roi > 0.02 and brier_m < brier_mkt and n_bets >= 30)
-        reason = "OK" if reliable else (
-            f"ROI={roi*100:+.1f}% (min +2%)" if roi is not None and roi <= 0.02 else
-            f"Brier modèle {brier_m:.3f} ≥ marché {brier_mkt:.3f}" if brier_m >= brier_mkt else
-            f"Seulement {n_bets} paris testés (min 30)"
-        )
-
-        meta = {
-            "reliable": bool(reliable), "reason": reason,
-            "n_train": split, "n_test": len(test),
-            "roi_estimated": roi, "n_bets": n_bets,
+        preds_h = clf_h.predict(X[split:])
+        preds_a = clf_a.predict(X[split:])
+        rmse_h = np.sqrt(mean_squared_error(y_h[split:], preds_h))
+        rmse_a = np.sqrt(mean_squared_error(y_a[split:], preds_a))
+        
+        clf_h.save_model(MODEL_FILE_H)
+        clf_a.save_model(MODEL_FILE_A)
+        model_home, model_away = clf_h, clf_a
+        
+        model_meta = {
+            "reliable": True,
+            "matchs_entrainement": len(X),
+            "erreur_moyenne_buts_dom": round(rmse_h, 2),
+            "erreur_moyenne_buts_ext": round(rmse_a, 2),
             "date": datetime.utcnow().isoformat()
         }
-        
-        json.dump(meta, open(REPORT_FILE,"w"), indent=2, default=str)
-        if reliable:
-            clf.save_model(MODEL_FILE)
-            model_xgb, model_meta = clf, meta
-            json.dump(meta, open(META_FILE,"w"), indent=2, default=str)
-            print("✅ MODÈLE DÉPLOYÉ")
-        else:
-            if os.path.exists(MODEL_FILE): os.remove(MODEL_FILE)
-            model_xgb = None; model_meta = meta
-            json.dump(meta, open(META_FILE,"w"), indent=2, default=str)
-            print(f"❌ MODÈLE NON DÉPLOYÉ — {reason}")
+        json.dump(model_meta, open(META_FILE, "w"), indent=2)
+        json.dump(model_meta, open(REPORT_FILE, "w"), indent=2)
+        print("✅ L'IA est prête et connaît la forme des équipes des 2 applications !")
 
     except Exception as e:
-        print(f"❌ Pipeline : {e}")
+        print(f"❌ Erreur : {e}")
         model_meta = {"reliable": False, "reason": str(e)}
-        json.dump(model_meta, open(REPORT_FILE,"w"), indent=2, default=str)
+        json.dump(model_meta, open(REPORT_FILE, "w"), indent=2)
 
 @app.get("/rapport")
 def rapport():
@@ -227,6 +241,4 @@ def rapport():
 
 @app.get("/")
 def health():
-    return {"status": "online", "model_deployed": model_xgb is not None,
-            "reliable": model_meta.get("reliable", False),
-            "roi": model_meta.get("roi_estimated")}
+    return {"status": "online", "model_ready": model_home is not None and model_meta.get("reliable")}

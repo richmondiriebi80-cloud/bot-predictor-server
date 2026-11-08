@@ -10,7 +10,7 @@ from typing import Optional, Dict
 import xgboost as xgb
 from sklearn.metrics import mean_squared_error
 
-app = FastAPI(title="FIFA Predictor - All Markets + Safe", version="14.0.0")
+app = FastAPI(title="FIFA Predictor - Flexible", version="16.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 MODEL_FILE_H  = "fifa_xgb_home.json"
@@ -40,13 +40,25 @@ def charger_modele():
             print(f"Erreur chargement : {e}")
 charger_modele()
 
+# ⚠️ LE MODÈLE DE DONNÉES EST DEVENU ULTRA-TOLÉRANT
 class AnalyseRequest(BaseModel):
-    home_team: str
-    away_team: str
-    cote_1: float
-    cote_x: float
-    cote_2: float
-    cotes: Optional[Dict[str, float]] = None
+    home_team: Optional[str] = "Équipe A"
+    away_team: Optional[str] = "Équipe B"
+    
+    # Accepte cote_1, cote_x, cote_2
+    cote_1: Optional[float] = 2.0
+    cote_x: Optional[float] = 3.0
+    cote_2: Optional[float] = 2.0
+    
+    # Accepte aussi cote_home, cote_draw, cote_away (au cas où Lovable utilise ces noms)
+    cote_home: Optional[float] = None
+    cote_draw: Optional[float] = None
+    cote_away: Optional[float] = None
+    
+    cotes: Optional[Dict[str, float]] = {}
+    
+    class Config:
+        extra = "allow" # Accepte n'importe quel autre champ sans planter
 
 def devig_3way(oh, od, oa):
     ph, pd_, pa = 1/oh, 1/od, 1/oa
@@ -64,25 +76,25 @@ def poisson_matrix(lambda_h, mu_a, max_goals=10):
 
 @app.post("/analyser-complet")
 def analyser(req: AnalyseRequest):
-    # 1. Prédiction des buts (avec sécurité si l'IA n'est pas prête)
+    # On récupère les cotes avec tolérance (si cote_1 est vide, on prend cote_home)
+    c1 = req.cote_1 or req.cote_home or 2.0
+    cx = req.cote_x or req.cote_draw or 3.0
+    c2 = req.cote_2 or req.cote_away or 2.0
+
     if model_home is not None and model_meta.get("reliable"):
-        feats = np.array([[req.cote_1, req.cote_x, req.cote_2, 1/req.cote_1 + 1/req.cote_x + 1/req.cote_2, np.log(req.cote_1/req.cote_2)]])
+        feats = np.array([[c1, cx, c2, 1/c1 + 1/cx + 1/c2, np.log(c1/c2)]])
         xg_home = float(model_home.predict(feats)[0])
         xg_away = float(model_away.predict(feats)[0])
     else:
-        p_h, p_d, p_a = devig_3way(req.cote_1, req.cote_x, req.cote_2)
+        p_h, p_d, p_a = devig_3way(c1, cx, c2)
         xg_home = 1.8 + (p_h * 1.5)
         xg_away = 1.2 + (p_a * 1.5)
     
-    # ⚠️ SÉCURITÉ FIFA VIRTUEL : L'IA ne peut pas prédire moins de 1.2 but à domicile et 0.8 à l'extérieur
     xg_home = max(1.2, xg_home)
     xg_away = max(0.8, xg_away)
-    xg_total = xg_home + xg_away
     
-    # 2. Matrices
     mat = poisson_matrix(xg_home, xg_away, 10)
     mat_mt1 = poisson_matrix(xg_home*0.45, xg_away*0.45, 10)
-    mat_mt2 = poisson_matrix(xg_home*0.55, xg_away*0.55, 10)
     
     i, j = np.indices(mat.shape)
     somme_buts = i + j
@@ -90,10 +102,6 @@ def analyser(req: AnalyseRequest):
     somme_mt1 = i_mt1 + j_mt1
 
     probas = {}
-    
-    # --- TOUS LES MARCHÉS ---
-    
-    # 1X2 & Double Chance
     probas["1"] = float(np.sum(mat[i > j])) * 100
     probas["X"] = float(np.sum(mat[i == j])) * 100
     probas["2"] = float(np.sum(mat[i < j])) * 100
@@ -101,65 +109,35 @@ def analyser(req: AnalyseRequest):
     probas["12"] = probas["1"] + probas["2"]
     probas["X2"] = probas["X"] + probas["2"]
     
-    # Total buts (Over / Under)
     for seuil in [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]:
         probas[f"O{seuil}"] = float(np.sum(mat[somme_buts > seuil])) * 100
         probas[f"U{seuil}"] = 100 - probas[f"O{seuil}"]
         
-    # Total Equipe 1 & 2
     for seuil in [0.5, 1.5, 2.5]:
         probas[f"Eq1_O{seuil}"] = float(np.sum(mat[i > seuil])) * 100
         probas[f"Eq1_U{seuil}"] = 100 - probas[f"Eq1_O{seuil}"]
         probas[f"Eq2_O{seuil}"] = float(np.sum(mat[j > seuil])) * 100
         probas[f"Eq2_U{seuil}"] = 100 - probas[f"Eq2_O{seuil}"]
 
-    # Chaque Équipe va marquer N+
     for seuil in [0.5, 1.5, 2.5]:
         condition = (i > seuil) & (j > seuil)
         probas[f"Chaque_Equipe_O{seuil}"] = float(np.sum(mat[condition])) * 100
         probas[f"Chaque_Equipe_U{seuil}"] = 100 - probas[f"Chaque_Equipe_O{seuil}"]
 
-    # Les 2 marquent (BTTS)
     probas["BTTS_Oui"] = float(np.sum(mat[1:, 1:])) * 100
     probas["BTTS_Non"] = 100 - probas["BTTS_Oui"]
     
-    # Pair / Impair
     probas["Pair"] = float(np.sum(mat[somme_buts % 2 == 0])) * 100
     probas["Impair"] = 100 - probas["Pair"]
     
-    # Mi-temps & But dans chaque MT
     probas["MT1_O0.5"] = float(np.sum(mat_mt1[somme_mt1 > 0.5])) * 100
     probas["MT1_O1.5"] = float(np.sum(mat_mt1[somme_mt1 > 1.5])) * 100
-    probas["MT2_O0.5"] = float(np.sum(mat_mt2[somme_mt1 > 0.5])) * 100
-    probas["MT2_O1.5"] = float(np.sum(mat_mt2[somme_mt1 > 1.5])) * 100
     
     p_but_mt1 = probas["MT1_O0.5"] / 100
-    p_but_mt2 = probas["MT2_O0.5"] / 100
+    p_but_mt2 = probas["MT1_O0.5"] / 100 
     probas["But_Chaque_MT_Oui"] = (p_but_mt1 * p_but_mt2) * 100
     probas["But_Chaque_MT_Non"] = 100 - probas["But_Chaque_MT_Oui"]
-    
-    # Scores exacts
-    best_idx = np.unravel_index(np.argmax(mat), mat.shape)
-    probas["Score_Exact_Principal"] = f"{best_idx[0]}-{best_idx[1]}"
-    best_idx_mt1 = np.unravel_index(np.argmax(mat_mt1), mat_mt1.shape)
-    probas["Score_MT1_Principal"] = f"{best_idx_mt1[0]}-{best_idx_mt1[1]}"
-    
-    # Nombre exact de buts
-    for k in range(7):
-        probas[f"Exact_Goals_{k}"] = float(np.sum(mat[somme_buts == k])) * 100
 
-    # MT / Fin de match (HT/FT)
-    ht_res = {"1": probas["1"]/100, "X": probas["X"]/100, "2": probas["2"]/100}
-    mt1_res = {
-        "1": float(np.sum(mat_mt1[i_mt1 > j_mt1])),
-        "X": float(np.sum(mat_mt1[i_mt1 == j_mt1])),
-        "2": float(np.sum(mat_mt1[i_mt1 < j_mt1]))
-    }
-    for h in ["1", "X", "2"]:
-        for f in ["1", "X", "2"]:
-            probas[f"HTFT_{h}_{f}"] = (mt1_res[h] * ht_res[f]) * 100
-
-    # --- DÉTECTION DES VALUE BETS (avec sécurité Anti-Under) ---
     value_bets = []
     if req.cotes:
         for key, cote in req.cotes.items():
@@ -169,12 +147,11 @@ def analyser(req: AnalyseRequest):
                 edge = p_ia - p_marche
                 
                 if edge > 3.0:
-                    # ⚠️ SÉCURITÉ : On bloque les Under 1.5, 2.5 et 3.5
-                    if key.startswith("U") and len(key) <= 4:
-                        try:
-                            if float(key.replace("U", "")) <= 3.5:
-                                continue
-                        except: pass
+                    if key.startswith("U"):
+                        if not model_meta.get("reliable"):
+                            continue
+                        elif edge < 10.0:
+                            continue
                     
                     value_bets.append({"marche": key, "proba_ia": round(p_ia, 1), "cote": cote, "edge": round(edge, 1)})
 

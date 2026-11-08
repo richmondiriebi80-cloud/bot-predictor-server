@@ -10,7 +10,7 @@ from typing import Optional, Dict
 import xgboost as xgb
 from sklearn.metrics import mean_squared_error
 
-app = FastAPI(title="FIFA Virtual - High Scoring Fix", version="17.0.0")
+app = FastAPI(title="FIFA Virtual - Full Probabilities", version="18.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 MODEL_FILE_H  = "fifa_xgb_home.json"
@@ -35,7 +35,6 @@ def charger_modele():
             if model_meta.get("reliable"):
                 model_home = xgb.XGBRegressor(); model_home.load_model(MODEL_FILE_H)
                 model_away = xgb.XGBRegressor(); model_away.load_model(MODEL_FILE_A)
-                print("✅ Modèles xG chargés.")
         except Exception as e:
             print(f"Erreur chargement : {e}")
 charger_modele()
@@ -74,18 +73,16 @@ def analyser(req: AnalyseRequest):
         xg_home = float(model_home.predict(feats)[0])
         xg_away = float(model_away.predict(feats)[0])
     else:
-        # ⚠️ CORRECTION FIFA VIRTUEL : On booste les buts attendus de base
-        # Le virtuel marque en moyenne 4 à 5 buts par match.
         p_h, p_d, p_a = devig_3way(c1, cx, c2)
-        xg_home = 2.2 + (p_h * 1.5) # Minimum ~2.2 buts
-        xg_away = 1.8 + (p_a * 1.5) # Minimum ~1.8 buts
+        xg_home = 2.2 + (p_h * 1.5)
+        xg_away = 1.8 + (p_a * 1.5)
     
-    # Sécurité : On force un minimum de 2.2 et 1.8 (Total ~4 buts)
     xg_home = max(2.2, xg_home)
     xg_away = max(1.8, xg_away)
     
     mat = poisson_matrix(xg_home, xg_away, 10)
     mat_mt1 = poisson_matrix(xg_home*0.45, xg_away*0.45, 10)
+    mat_mt2 = poisson_matrix(xg_home*0.55, xg_away*0.55, 10)
     
     i, j = np.indices(mat.shape)
     somme_buts = i + j
@@ -96,54 +93,74 @@ def analyser(req: AnalyseRequest):
     probas["1"] = float(np.sum(mat[i > j])) * 100
     probas["X"] = float(np.sum(mat[i == j])) * 100
     probas["2"] = float(np.sum(mat[i < j])) * 100
+    probas["1X"] = probas["1"] + probas["X"]
+    probas["12"] = probas["1"] + probas["2"]
+    probas["X2"] = probas["X"] + probas["2"]
     
     for seuil in [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]:
         probas[f"O{seuil}"] = float(np.sum(mat[somme_buts > seuil])) * 100
         probas[f"U{seuil}"] = 100 - probas[f"O{seuil}"]
         
+    for seuil in [0.5, 1.5, 2.5]:
+        probas[f"Eq1_O{seuil}"] = float(np.sum(mat[i > seuil])) * 100
+        probas[f"Eq2_O{seuil}"] = float(np.sum(mat[j > seuil])) * 100
+        probas[f"Chaque_Equipe_O{seuil}"] = float(np.sum(mat[(i > seuil) & (j > seuil)])) * 100
+
     probas["BTTS_Oui"] = float(np.sum(mat[1:, 1:])) * 100
     probas["BTTS_Non"] = 100 - probas["BTTS_Oui"]
     
-    # Top scores exacts (On trie la matrice)
-    flat_indices = np.argsort(mat.ravel())[::-1][:3]
-    top_scores = []
-    for idx in flat_indices:
-        score_i, score_j = np.unravel_index(idx, mat.shape)
-        top_scores.append({"score": f"{score_i}-{score_j}", "probabilite": round(float(mat[score_i, score_j])*100, 1)})
+    probas["Pair"] = float(np.sum(mat[somme_buts % 2 == 0])) * 100
+    probas["Impair"] = 100 - probas["Pair"]
+    
+    for k in range(7):
+        probas[f"Exact_Goals_{k}"] = float(np.sum(mat[somme_buts == k])) * 100
 
-    # Value Bets (Avec sécurité Under)
+    probas["MT1_O0.5"] = float(np.sum(mat_mt1[somme_mt1 > 0.5])) * 100
+    probas["MT2_O0.5"] = float(np.sum(mat_mt2[somme_mt1 > 0.5])) * 100
+    probas["But_Chaque_MT_Oui"] = (probas["MT1_O0.5"] / 100) * (probas["MT2_O0.5"] / 100) * 100
+    
+    # HT/FT
+    mt1_res = {"1": float(np.sum(mat_mt1[i_mt1 > j_mt1])), "X": float(np.sum(mat_mt1[i_mt1 == j_mt1])), "2": float(np.sum(mat_mt1[i_mt1 < j_mt1]))}
+    ft_res = {"1": probas["1"]/100, "X": probas["X"]/100, "2": probas["2"]/100}
+    for h in ["1", "X", "2"]:
+        for f in ["1", "X", "2"]:
+            probas[f"HTFT_{h}_{f}"] = (mt1_res[h] * ft_res[f]) * 100
+
+    # Top Scores
+    flat_indices = np.argsort(mat.ravel())[::-1][:3]
+    top_scores = [{"score": f"{np.unravel_index(idx, mat.shape)[0]}-{np.unravel_index(idx, mat.shape)[1]}", "probabilite": round(float(mat[np.unravel_index(idx, mat.shape)])*100, 1)} for idx in flat_indices]
+
+    # On prépare les résultats pour TOUS les marchés demandés
+    resultats_marches = {}
     value_bets = []
+    
     if req.cotes:
         for key, cote in req.cotes.items():
-            if key in probas and isinstance(probas[key], (int, float)) and cote > 1.01:
+            if key in probas and isinstance(probas[key], (int, float)):
                 p_ia = probas[key]
-                p_marche = (1 / cote) * 100
+                p_marche = (1 / cote) * 100 if cote > 1.01 else 0
                 edge = p_ia - p_marche
                 
+                # On ajoute le résultat à la liste globale
+                resultats_marches[key] = {"probabilite_ia": round(p_ia, 1), "cote": cote, "edge": round(edge, 1)}
+                
+                # Si c'est une faille, on l'ajoute aux value_bets
                 if edge > 3.0:
-                    if key.startswith("U"):
-                        if not model_meta.get("reliable") or edge < 10.0:
-                            continue
-                    
+                    if key.startswith("U") and (not model_meta.get("reliable") or edge < 10.0):
+                        continue
                     value_bets.append({"marche": key, "proba_ia": round(p_ia, 1), "cote": cote, "edge": round(edge, 1)})
 
     value_bets = sorted(value_bets, key=lambda x: x["edge"], reverse=True)
 
     return {
         "status": "success",
-        "match": f"{req.home_team} vs {req.away_team}",
         "predictions_ia": {"xg_home": round(xg_home, 2), "xg_away": round(xg_away, 2)},
-        "probabilites_buts": {
-            "over_1_5": round(probas["O1.5"], 1),
-            "over_2_5": round(probas["O2.5"], 1),
-            "over_3_5": round(probas["O3.5"], 1),
-            "btts_oui": round(probas["BTTS_Oui"], 1)
-        },
         "top_scores_exacts": top_scores,
+        "resultats_marches": resultats_marches, # <--- TOUTES LES PROBABILITÉS ICI
         "value_bets": value_bets[:10] if value_bets else ["Aucun value bet détecté."]
     }
 
-# (Le reste du code /reentrainer, /rapport et /health reste identique)
+# (Les routes /reentrainer, /rapport et /health restent identiques)
 @app.get("/reentrainer")
 def reentrainer(bt: BackgroundTasks):
     bt.add_task(_pipeline)
@@ -199,8 +216,6 @@ def _pipeline():
         model_meta = {"reliable": True, "matchs_entrainement": len(X), "date": datetime.utcnow().isoformat()}
         json.dump(model_meta, open(META_FILE, "w"), indent=2)
         json.dump(model_meta, open(REPORT_FILE, "w"), indent=2)
-        print("✅ IA Prête !")
-
     except Exception as e:
         model_meta = {"reliable": False, "reason": str(e)}
         json.dump(model_meta, open(REPORT_FILE, "w"), indent=2)

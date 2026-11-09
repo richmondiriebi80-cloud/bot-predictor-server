@@ -10,7 +10,7 @@ from typing import Optional, Dict
 import xgboost as xgb
 from sklearn.metrics import mean_squared_error
 
-app = FastAPI(title="FIFA Predictor - Force Coupons", version="25.0.0")
+app = FastAPI(title="FIFA Predictor - Margin Filter Only", version="28.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 MODEL_FILE_H  = "fifa_xgb_home.json"
@@ -48,6 +48,9 @@ class AnalyseRequest(BaseModel):
     cote_2: Optional[float] = 2.0
     cotes: Optional[Dict[str, float]] = {}
     
+    # ⚠️ Seul le filtre de marge reste
+    marge_max: Optional[float] = 10.0 
+    
     class Config:
         extra = "allow"
 
@@ -77,8 +80,21 @@ def analyser(req: AnalyseRequest):
         cx = float(req.cote_x) if req.cote_x else 3.0
         c2 = float(req.cote_2) if req.cote_2 else 2.0
 
+        # Calcul de la marge du bookmaker
+        marge_brute = (1/c1) + (1/cx) + (1/c2)
+        marge_pct = round((marge_brute - 1) * 100, 2)
+
+        # Si la marge est trop élevée, on rejette le match
+        if marge_pct > req.marge_max:
+            return {
+                "status": "refused",
+                "message": f"❌ Match rejeté : La marge de 1xBet est de {marge_pct}%, ce qui dépasse votre limite de {req.marge_max}%.",
+                "marge_match": marge_pct,
+                "value_bets": []
+            }
+
         if model_home is not None and model_meta.get("reliable"):
-            feats = np.array([[c1, cx, c2, 1/c1 + 1/cx + 1/c2, np.log(c1/c2), 2.5, 2.0, 2.0, 2.5]])
+            feats = np.array([[c1, cx, c2, marge_brute, np.log(c1/c2), 2.5, 2.0, 2.0, 2.5]])
             xg_home = float(model_home.predict(feats)[0])
             xg_away = float(model_away.predict(feats)[0])
         else:
@@ -118,7 +134,6 @@ def analyser(req: AnalyseRequest):
                     
                     resultats_marches[key] = {"probabilite_ia": round(p_ia, 1), "cote": float(cote), "edge": round(edge, 1)}
                     
-                    # ⚠️ SEUIL BAISSÉ À 1% POUR FORCER LES COUPONS
                     if edge > 1.0:
                         if key.startswith("U") and (not model_meta.get("reliable") or edge < 10.0):
                             continue
@@ -126,7 +141,6 @@ def analyser(req: AnalyseRequest):
 
         value_bets = sorted(value_bets, key=lambda x: x["edge"], reverse=True)
 
-        # Si aucun value bet trouvé, on renvoie les 3 paris avec la plus grande probabilité
         if not value_bets and resultats_marches:
             top_probas = sorted(resultats_marches.items(), key=lambda x: x[1]["probabilite_ia"], reverse=True)[:3]
             for k, v in top_probas:
@@ -137,6 +151,7 @@ def analyser(req: AnalyseRequest):
             "predictions_ia": {"xg_home": round(xg_home, 2), "xg_away": round(xg_away, 2)},
             "top_scores_exacts": top_scores,
             "resultats_marches": resultats_marches,
+            "marge_match": marge_pct,
             "value_bets": value_bets[:10]
         }
 

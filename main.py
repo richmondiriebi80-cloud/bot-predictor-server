@@ -10,7 +10,7 @@ from typing import Optional, Dict
 import xgboost as xgb
 from sklearn.metrics import mean_squared_error
 
-app = FastAPI(title="FIFA Predictor - Final Version", version="20.0.0")
+app = FastAPI(title="FIFA Predictor - JSON Fix", version="21.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 MODEL_FILE_H  = "fifa_xgb_home.json"
@@ -22,7 +22,6 @@ model_home = None
 model_away = None
 model_meta = {"reliable": False}
 
-# Les deux applications sont connectées ici
 LOVABLE_EXPORTS = [
     "https://goal-predictor-prov1.lovable.app/api/public/export-matches",
     "https://fifaliveprobet.lovable.app/api/public/export-matches"
@@ -177,9 +176,19 @@ def _pipeline():
         for url in LOVABLE_EXPORTS:
             try:
                 r = requests.get(url, timeout=30)
-                if r.json(): dfs.append(pd.DataFrame(r.json()))
-            except: pass
-        if not dfs: raise ValueError("Aucune donnée.")
+                data = r.json()
+                
+                # ⚠️ CORRECTION ICI : On extrait la liste "matches" si elle existe
+                if isinstance(data, dict) and "matches" in data:
+                    data = data["matches"]
+                    
+                if data and isinstance(data, list): 
+                    dfs.append(pd.DataFrame(data))
+            except Exception as e: 
+                print(f"Erreur lecture {url}: {e}")
+                
+        if not dfs: raise ValueError("Aucune donnée de match valide trouvée.")
+        
         df = pd.concat(dfs, ignore_index=True)
         if "id" in df.columns: df = df.drop_duplicates(subset=["id"])
         elif "match_id" in df.columns: df = df.drop_duplicates(subset=["match_id"])
@@ -209,7 +218,7 @@ def _pipeline():
             if a not in team_history: team_history[a] = []
             team_history[h].append([sh, sa]); team_history[a].append([sa, sh])
 
-        if len(X_data) < 50: raise ValueError(f"Pas assez de matchs avec cotes ({len(X_data)}).")
+        if len(X_data) < 50: raise ValueError(f"Pas assez de matchs avec cotes ({len(X_data)}). Il en faut 50 pour entraîner l'IA.")
         X, y_h, y_a = np.array(X_data), np.array(y_home), np.array(y_away)
         split = int(len(X) * 0.8)
         
@@ -230,7 +239,6 @@ def _pipeline():
 def rapport():
     return json.load(open(REPORT_FILE)) if os.path.exists(REPORT_FILE) else {"status": "no_report"}
 
-# ⚠️ LA CORRECTION POUR UPTIMEROBOT EST ICI :
 @app.api_route("/", methods=["GET", "HEAD"])
 def health():
     return {"status": "online", "model_ready": model_home is not None}

@@ -1,0 +1,16 @@
+name: Entrainement Quotidien IA
+
+on:
+  schedule:
+    # Tous les jours à 04:00 du matin
+    - cron: '0 4 * * *'
+  # Permet aussi de lancer le script manuellement
+  workflow_dispatch:
+
+jobs:
+  appel_render:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Appeler le serveur Render pour l'entraînement
+        run: |
+          curl -X GET "https://bot-predictor-server.onrender.com/reentrainer"

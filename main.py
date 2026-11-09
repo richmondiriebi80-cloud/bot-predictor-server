@@ -10,7 +10,7 @@ from typing import Optional, Dict
 import xgboost as xgb
 from sklearn.metrics import mean_squared_error
 
-app = FastAPI(title="FIFA Predictor - JSON Fix", version="21.0.0")
+app = FastAPI(title="FIFA Predictor - Fix Feature Mismatch", version="23.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 MODEL_FILE_H  = "fifa_xgb_home.json"
@@ -67,102 +67,124 @@ def poisson_matrix(lambda_h, mu_a, max_goals=10):
 
 @app.post("/analyser-complet")
 def analyser(req: AnalyseRequest):
-    c1, cx, c2 = req.cote_1 or req.cote_home or 2.0, req.cote_x or req.cote_draw or 3.0, req.cote_2 or req.cote_away or 2.0
+    try:
+        c1 = float(req.cote_1) if req.cote_1 else (float(req.cote_home) if hasattr(req, 'cote_home') and req.cote_home else 2.0)
+        cx = float(req.cote_x) if req.cote_x else (float(req.cote_draw) if hasattr(req, 'cote_draw') and req.cote_draw else 3.0)
+        c2 = float(req.cote_2) if req.cote_2 else (float(req.cote_away) if hasattr(req, 'cote_away') and req.cote_away else 2.0)
 
-    if model_home is not None and model_meta.get("reliable"):
-        feats = np.array([[c1, cx, c2, 1/c1 + 1/cx + 1/c2, np.log(c1/c2)]])
-        xg_home = float(model_home.predict(feats)[0])
-        xg_away = float(model_away.predict(feats)[0])
-    else:
-        p_h, p_d, p_a = devig_3way(c1, cx, c2)
-        xg_home = 2.2 + (p_h * 1.5)
-        xg_away = 1.8 + (p_a * 1.5)
-    
-    xg_home = max(2.2, xg_home)
-    xg_away = max(1.8, xg_away)
-    
-    mat = poisson_matrix(xg_home, xg_away, 10)
-    mat_mt1 = poisson_matrix(xg_home*0.45, xg_away*0.45, 10)
-    mat_mt2 = poisson_matrix(xg_home*0.55, xg_away*0.55, 10)
-    
-    i, j = np.indices(mat.shape)
-    somme_buts = i + j
-    i_mt1, j_mt1 = np.indices(mat_mt1.shape)
-    somme_mt1 = i_mt1 + j_mt1
-
-    probas = {}
-    probas["1"] = float(np.sum(mat[i > j])) * 100
-    probas["X"] = float(np.sum(mat[i == j])) * 100
-    probas["2"] = float(np.sum(mat[i < j])) * 100
-    probas["1X"] = probas["1"] + probas["X"]
-    probas["12"] = probas["1"] + probas["2"]
-    probas["X2"] = probas["X"] + probas["2"]
-    
-    for seuil in [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]:
-        probas[f"O{seuil}"] = float(np.sum(mat[somme_buts > seuil])) * 100
-        probas[f"U{seuil}"] = 100 - probas[f"O{seuil}"]
+        if model_home is not None and model_meta.get("reliable"):
+            # ⚠️ CORRECTION ICI : On ajoute 4 valeurs par défaut pour avoir les 9 features attendues
+            hist_h_scored, hist_h_conceded = 2.5, 2.0
+            hist_a_scored, hist_a_conceded = 2.0, 2.5
+            
+            feats = np.array([[
+                c1, cx, c2, 
+                1/c1 + 1/cx + 1/c2, 
+                np.log(c1/c2),
+                hist_h_scored, hist_h_conceded, hist_a_scored, hist_a_conceded
+            ]])
+            
+            xg_home = float(model_home.predict(feats)[0])
+            xg_away = float(model_away.predict(feats)[0])
+        else:
+            p_h, p_d, p_a = devig_3way(c1, cx, c2)
+            xg_home = 2.2 + (p_h * 1.5)
+            xg_away = 1.8 + (p_a * 1.5)
         
-    for seuil in [0.5, 1.5, 2.5]:
-        probas[f"Eq1_O{seuil}"] = float(np.sum(mat[i > seuil])) * 100
-        probas[f"Eq1_U{seuil}"] = 100 - probas[f"Eq1_O{seuil}"]
-        probas[f"Eq2_O{seuil}"] = float(np.sum(mat[j > seuil])) * 100
-        probas[f"Eq2_U{seuil}"] = 100 - probas[f"Eq2_O{seuil}"]
-        probas[f"Chaque_Equipe_O{seuil}"] = float(np.sum(mat[(i > seuil) & (j > seuil)])) * 100
-        probas[f"Chaque_Equipe_U{seuil}"] = 100 - probas[f"Chaque_Equipe_O{seuil}"]
+        xg_home = max(2.2, xg_home)
+        xg_away = max(1.8, xg_away)
+        
+        mat = poisson_matrix(xg_home, xg_away, 10)
+        mat_mt1 = poisson_matrix(xg_home*0.45, xg_away*0.45, 10)
+        mat_mt2 = poisson_matrix(xg_home*0.55, xg_away*0.55, 10)
+        
+        i, j = np.indices(mat.shape)
+        somme_buts = i + j
+        i_mt1, j_mt1 = np.indices(mat_mt1.shape)
+        somme_mt1 = i_mt1 + j_mt1
 
-    probas["BTTS_Oui"] = float(np.sum(mat[1:, 1:])) * 100
-    probas["BTTS_Non"] = 100 - probas["BTTS_Oui"]
-    probas["Pair"] = float(np.sum(mat[somme_buts % 2 == 0])) * 100
-    probas["Impair"] = 100 - probas["Pair"]
-    
-    for k in range(7):
-        probas[f"Exact_Goals_{k}"] = float(np.sum(mat[somme_buts == k])) * 100
+        probas = {}
+        probas["1"] = float(np.sum(mat[i > j])) * 100
+        probas["X"] = float(np.sum(mat[i == j])) * 100
+        probas["2"] = float(np.sum(mat[i < j])) * 100
+        probas["1X"] = probas["1"] + probas["X"]
+        probas["12"] = probas["1"] + probas["2"]
+        probas["X2"] = probas["X"] + probas["2"]
+        
+        for seuil in [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]:
+            probas[f"O{seuil}"] = float(np.sum(mat[somme_buts > seuil])) * 100
+            probas[f"U{seuil}"] = 100 - probas[f"O{seuil}"]
+            
+        for seuil in [0.5, 1.5, 2.5]:
+            probas[f"Eq1_O{seuil}"] = float(np.sum(mat[i > seuil])) * 100
+            probas[f"Eq1_U{seuil}"] = 100 - probas[f"Eq1_O{seuil}"]
+            probas[f"Eq2_O{seuil}"] = float(np.sum(mat[j > seuil])) * 100
+            probas[f"Eq2_U{seuil}"] = 100 - probas[f"Eq2_O{seuil}"]
+            probas[f"Chaque_Equipe_O{seuil}"] = float(np.sum(mat[(i > seuil) & (j > seuil)])) * 100
+            probas[f"Chaque_Equipe_U{seuil}"] = 100 - probas[f"Chaque_Equipe_O{seuil}"]
 
-    probas["MT1_O0.5"] = float(np.sum(mat_mt1[somme_mt1 > 0.5])) * 100
-    probas["MT1_O1.5"] = float(np.sum(mat_mt1[somme_mt1 > 1.5])) * 100
-    probas["MT2_O0.5"] = float(np.sum(mat_mt2[somme_mt1 > 0.5])) * 100
-    probas["MT2_O1.5"] = float(np.sum(mat_mt2[somme_mt1 > 1.5])) * 100
-    
-    p_but_mt1 = probas["MT1_O0.5"] / 100
-    p_but_mt2 = probas["MT2_O0.5"] / 100
-    probas["But_Chaque_MT_Oui"] = (p_but_mt1 * p_but_mt2) * 100
-    probas["But_Chaque_MT_Non"] = 100 - probas["But_Chaque_MT_Oui"]
+        probas["BTTS_Oui"] = float(np.sum(mat[1:, 1:])) * 100
+        probas["BTTS_Non"] = 100 - probas["BTTS_Oui"]
+        probas["Pair"] = float(np.sum(mat[somme_buts % 2 == 0])) * 100
+        probas["Impair"] = 100 - probas["Pair"]
+        
+        for k in range(7):
+            probas[f"Exact_Goals_{k}"] = float(np.sum(mat[somme_buts == k])) * 100
 
-    mt1_res = {"1": float(np.sum(mat_mt1[i_mt1 > j_mt1])), "X": float(np.sum(mat_mt1[i_mt1 == j_mt1])), "2": float(np.sum(mat_mt1[i_mt1 < j_mt1]))}
-    ft_res = {"1": probas["1"]/100, "X": probas["X"]/100, "2": probas["2"]/100}
-    for h in ["1", "X", "2"]:
-        for f in ["1", "X", "2"]:
-            probas[f"HTFT_{h}_{f}"] = (mt1_res[h] * ft_res[f]) * 100
+        probas["MT1_O0.5"] = float(np.sum(mat_mt1[somme_mt1 > 0.5])) * 100
+        probas["MT1_O1.5"] = float(np.sum(mat_mt1[somme_mt1 > 1.5])) * 100
+        probas["MT2_O0.5"] = float(np.sum(mat_mt2[somme_mt1 > 0.5])) * 100
+        probas["MT2_O1.5"] = float(np.sum(mat_mt2[somme_mt1 > 1.5])) * 100
+        
+        p_but_mt1 = probas["MT1_O0.5"] / 100
+        p_but_mt2 = probas["MT2_O0.5"] / 100
+        probas["But_Chaque_MT_Oui"] = (p_but_mt1 * p_but_mt2) * 100
+        probas["But_Chaque_MT_Non"] = 100 - probas["But_Chaque_MT_Oui"]
 
-    flat_indices = np.argsort(mat.ravel())[::-1][:3]
-    top_scores = [{"score": f"{np.unravel_index(idx, mat.shape)[0]}-{np.unravel_index(idx, mat.shape)[1]}", "probabilite": round(float(mat[np.unravel_index(idx, mat.shape)])*100, 1)} for idx in flat_indices]
+        mt1_res = {"1": float(np.sum(mat_mt1[i_mt1 > j_mt1])), "X": float(np.sum(mat_mt1[i_mt1 == j_mt1])), "2": float(np.sum(mat_mt1[i_mt1 < j_mt1]))}
+        ft_res = {"1": probas["1"]/100, "X": probas["X"]/100, "2": probas["2"]/100}
+        for h in ["1", "X", "2"]:
+            for f in ["1", "X", "2"]:
+                probas[f"HTFT_{h}_{f}"] = (mt1_res[h] * ft_res[f]) * 100
 
-    value_bets = []
-    resultats_marches = {}
-    
-    if req.cotes:
-        for key, cote in req.cotes.items():
-            if key in probas and isinstance(probas[key], (int, float)) and cote > 1.01:
-                p_ia = probas[key]
-                p_marche = (1 / cote) * 100
-                edge = p_ia - p_marche
-                
-                resultats_marches[key] = {"probabilite_ia": round(p_ia, 1), "cote": cote, "edge": round(edge, 1)}
-                
-                if edge > 3.0:
-                    if key.startswith("U") and (not model_meta.get("reliable") or edge < 10.0):
-                        continue
-                    value_bets.append({"marche": key, "proba_ia": round(p_ia, 1), "cote": cote, "edge": round(edge, 1)})
+        flat_indices = np.argsort(mat.ravel())[::-1][:3]
+        top_scores = [{"score": f"{np.unravel_index(idx, mat.shape)[0]}-{np.unravel_index(idx, mat.shape)[1]}", "probabilite": round(float(mat[np.unravel_index(idx, mat.shape)]*100, 1))} for idx in flat_indices]
 
-    value_bets = sorted(value_bets, key=lambda x: x["edge"], reverse=True)
+        value_bets = []
+        resultats_marches = {}
+        
+        if req.cotes and isinstance(req.cotes, dict):
+            for key, cote in req.cotes.items():
+                if key in probas and isinstance(probas[key], (int, float)) and cote and float(cote) > 1.01:
+                    p_ia = probas[key]
+                    p_marche = (1 / float(cote)) * 100
+                    edge = p_ia - p_marche
+                    
+                    resultats_marches[key] = {"probabilite_ia": round(p_ia, 1), "cote": float(cote), "edge": round(edge, 1)}
+                    
+                    if edge > 3.0:
+                        if key.startswith("U") and (not model_meta.get("reliable") or edge < 10.0):
+                            continue
+                        value_bets.append({"marche": key, "proba_ia": round(p_ia, 1), "cote": float(cote), "edge": round(edge, 1)})
 
-    return {
-        "status": "success",
-        "predictions_ia": {"xg_home": round(xg_home, 2), "xg_away": round(xg_away, 2)},
-        "top_scores_exacts": top_scores,
-        "resultats_marches": resultats_marches,
-        "value_bets": value_bets[:10] if value_bets else ["Aucun value bet détecté."]
-    }
+        value_bets = sorted(value_bets, key=lambda x: x["edge"], reverse=True)
+
+        return {
+            "status": "success",
+            "predictions_ia": {"xg_home": round(xg_home, 2), "xg_away": round(xg_away, 2)},
+            "top_scores_exacts": top_scores,
+            "resultats_marches": resultats_marches,
+            "value_bets": value_bets[:10] if value_bets else ["Aucun value bet détecté."]
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Erreur : {str(e)}",
+            "predictions_ia": {"xg_home": 2.0, "xg_away": 1.5},
+            "top_scores_exacts": [{"score": "2-1", "probabilite": 12.0}],
+            "value_bets": []
+        }
 
 @app.get("/reentrainer")
 def reentrainer(bt: BackgroundTasks):
@@ -177,11 +199,8 @@ def _pipeline():
             try:
                 r = requests.get(url, timeout=30)
                 data = r.json()
-                
-                # ⚠️ CORRECTION ICI : On extrait la liste "matches" si elle existe
                 if isinstance(data, dict) and "matches" in data:
                     data = data["matches"]
-                    
                 if data and isinstance(data, list): 
                     dfs.append(pd.DataFrame(data))
             except Exception as e: 

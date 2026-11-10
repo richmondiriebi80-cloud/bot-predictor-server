@@ -49,7 +49,7 @@ class AnalyseRequest(BaseModel):
     cotes: Optional[Dict[str, float]] = {}
     
     # ⚠️ Seul le filtre de marge reste
-    marge_max: Optional[float] = 10.0 
+    marge_max: Optional[float] = 100.0 
     
     class Config:
         extra = "allow"

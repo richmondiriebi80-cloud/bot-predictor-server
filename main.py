@@ -10,7 +10,7 @@ from typing import Optional, Dict
 import xgboost as xgb
 from sklearn.metrics import mean_squared_error
 
-app = FastAPI(title="FIFA Predictor - Margin Filter Only", version="28.0.0")
+app = FastAPI(title="FIFA Predictor - Dynamic Scores", version="29.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 MODEL_FILE_H  = "fifa_xgb_home.json"
@@ -47,8 +47,6 @@ class AnalyseRequest(BaseModel):
     cote_x: Optional[float] = 3.0
     cote_2: Optional[float] = 2.0
     cotes: Optional[Dict[str, float]] = {}
-    
-    # ⚠️ Seul le filtre de marge reste
     marge_max: Optional[float] = 100.0 
     
     class Config:
@@ -80,17 +78,14 @@ def analyser(req: AnalyseRequest):
         cx = float(req.cote_x) if req.cote_x else 3.0
         c2 = float(req.cote_2) if req.cote_2 else 2.0
 
-        # Calcul de la marge du bookmaker
         marge_brute = (1/c1) + (1/cx) + (1/c2)
         marge_pct = round((marge_brute - 1) * 100, 2)
 
-        # Si la marge est trop élevée, on rejette le match
         if marge_pct > req.marge_max:
             return {
                 "status": "refused",
-                "message": f"❌ Match rejeté : La marge de 1xBet est de {marge_pct}%, ce qui dépasse votre limite de {req.marge_max}%.",
-                "marge_match": marge_pct,
-                "value_bets": []
+                "message": f"Match rejeté : La marge de 1xBet est de {marge_pct}%.",
+                "marge_match": marge_pct
             }
 
         if model_home is not None and model_meta.get("reliable"):
@@ -98,12 +93,13 @@ def analyser(req: AnalyseRequest):
             xg_home = float(model_home.predict(feats)[0])
             xg_away = float(model_away.predict(feats)[0])
         else:
+            # ⚠️ FORMULE DE SECOURS CORRIGÉE (Plus agressive pour différencier les favoris)
             p_h, p_d, p_a = devig_3way(c1, cx, c2)
-            xg_home = 2.2 + (p_h * 1.5)
-            xg_away = 1.8 + (p_a * 1.5)
+            xg_home = 0.8 + (p_h * 4.5) # Augmenté pour favoriser les gros favoris
+            xg_away = 0.5 + (p_a * 4.5) # Réduit pour les petits outsiders
         
-        xg_home = max(2.2, xg_home)
-        xg_away = max(1.8, xg_away)
+        xg_home = max(1.5, xg_home)
+        xg_away = max(0.5, xg_away)
         
         top_scores = get_top_scores(xg_home, xg_away)
         mat = poisson_matrix(xg_home, xg_away, 10)
@@ -140,7 +136,6 @@ def analyser(req: AnalyseRequest):
                         value_bets.append({"marche": key, "proba_ia": round(p_ia, 1), "cote": float(cote), "edge": round(edge, 1)})
 
         value_bets = sorted(value_bets, key=lambda x: x["edge"], reverse=True)
-
         if not value_bets and resultats_marches:
             top_probas = sorted(resultats_marches.items(), key=lambda x: x[1]["probabilite_ia"], reverse=True)[:3]
             for k, v in top_probas:
@@ -156,13 +151,7 @@ def analyser(req: AnalyseRequest):
         }
 
     except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e),
-            "predictions_ia": {"xg_home": 2.5, "xg_away": 1.8},
-            "top_scores_exacts": get_top_scores(2.5, 1.8), 
-            "value_bets": []
-        }
+        return {"status": "error", "message": str(e), "value_bets": []}
 
 @app.get("/reentrainer")
 def reentrainer(bt: BackgroundTasks):
@@ -187,9 +176,8 @@ def _pipeline():
         
         df = pd.concat(dfs, ignore_index=True)
         if "id" in df.columns: df = df.drop_duplicates(subset=["id"])
-        elif "match_id" in df.columns: df = df.drop_duplicates(subset=["match_id"])
 
-        rename = {"hs": "score_home", "as": "score_away", "home": "home_team", "away": "away_team", "homeScore": "score_home", "awayScore": "score_away", "home_score": "score_home", "away_score": "score_away", "coteHome": "cote_home", "coteDraw": "cote_draw", "coteAway": "cote_away"}
+        rename = {"hs": "score_home", "as": "score_away", "home": "home_team", "away": "away_team"}
         df = df.rename(columns={k:v for k,v in rename.items() if k in df.columns})
         
         df["date"] = pd.to_datetime(df["date"], errors="coerce")

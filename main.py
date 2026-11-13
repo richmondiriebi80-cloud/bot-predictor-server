@@ -1,16 +1,17 @@
-import os, math, json
+import os, math, json, gc
 from datetime import datetime
 import numpy as np
-import pandas as pd
 import requests
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict
 import xgboost as xgb
-from sklearn.metrics import mean_squared_error
 
-app = FastAPI(title="FIFA Predictor - Real Team Form", version="30.0.0")
+# On force XGBoost à utiliser le CPU et à limiter les threads
+xgb.set_config(verbosity=0, nthread=1)
+
+app = FastAPI(title="FIFA Predictor - Low Memory", version="31.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 MODEL_FILE_H  = "fifa_xgb_home.json"
@@ -71,14 +72,13 @@ def get_top_scores(xg_home, xg_away):
     flat_indices = np.argsort(mat.ravel())[::-1][:3]
     return [{"score": f"{np.unravel_index(idx, mat.shape)[0]}-{np.unravel_index(idx, mat.shape)[1]}", "probabilite": round(float(mat[np.unravel_index(idx, mat.shape)]*100), 1)} for idx in flat_indices]
 
-# ⚠️ NOUVELLE FONCTION : Récupère la vraie forme des 2 équipes avant de prédire
 def get_real_team_stats(home_team, away_team):
-    h_scored, h_conceded, a_scored, a_conceded = 2.5, 2.0, 2.0, 2.5 # Valeurs par défaut
+    h_scored, h_conceded, a_scored, a_conceded = 2.5, 2.0, 2.0, 2.5
     try:
         all_matches = []
         for url in LOVABLE_EXPORTS:
             try:
-                r = requests.get(url, timeout=5) # Timeout court pour ne pas bloquer
+                r = requests.get(url, timeout=5)
                 data = r.json()
                 if isinstance(data, dict) and "matches" in data: data = data["matches"]
                 if isinstance(data, list): all_matches.extend(data)
@@ -86,36 +86,30 @@ def get_real_team_stats(home_team, away_team):
         
         if not all_matches: return h_scored, h_conceded, a_scored, a_conceded
 
-        df = pd.DataFrame(all_matches)
-        rename = {"hs": "score_home", "as": "score_away", "home": "home_team", "away": "away_team"}
-        df = df.rename(columns={k:v for k,v in rename.items() if k in df.columns})
-        
-        # Historique équipe Domicile
-        h_matches = df[(df['home_team'] == home_team) | (df['away_team'] == home_team)].tail(5)
-        if not h_matches.empty:
-            h_scored_list, h_conceded_list = [], []
-            for _, row in h_matches.iterrows():
-                if row['home_team'] == home_team:
-                    h_scored_list.append(row['score_home']); h_conceded_list.append(row['score_away'])
-                else:
-                    h_scored_list.append(row['score_away']); h_conceded_list.append(row['score_home'])
-            h_scored = np.mean(h_scored_list)
-            h_conceded = np.mean(h_conceded_list)
+        # Remplacement de pandas par des dictionnaires pour économiser la RAM
+        h_scored_list, h_conceded_list = [], []
+        a_scored_list, a_conceded_list = [], []
 
-        # Historique équipe Extérieur
-        a_matches = df[(df['home_team'] == away_team) | (df['away_team'] == away_team)].tail(5)
-        if not a_matches.empty:
-            a_scored_list, a_conceded_list = [], []
-            for _, row in a_matches.iterrows():
-                if row['home_team'] == away_team:
-                    a_scored_list.append(row['score_home']); a_conceded_list.append(row['score_away'])
-                else:
-                    a_scored_list.append(row['score_away']); a_conceded_list.append(row['score_home'])
-            a_scored = np.mean(a_scored_list)
-            a_conceded = np.mean(a_conceded_list)
+        for m in all_matches[-20:]: # On ne regarde que les 20 derniers pour la RAM
+            h, a = m.get("home"), m.get("away")
+            sh, sa = m.get("hs"), m.get("as")
+            if sh is None or sa is None: continue
+            
+            if h == home_team:
+                h_scored_list.append(sh); h_conceded_list.append(sa)
+            elif a == home_team:
+                h_scored_list.append(sa); h_conceded_list.append(sh)
+                
+            if h == away_team:
+                a_scored_list.append(sh); a_conceded_list.append(sa)
+            elif a == away_team:
+                a_scored_list.append(sa); a_conceded_list.append(sh)
+
+        if h_scored_list: h_scored, h_conceded = np.mean(h_scored_list[-5:]), np.mean(h_conceded_list[-5:])
+        if a_scored_list: a_scored, a_conceded = np.mean(a_scored_list[-5:]), np.mean(a_conceded_list[-5:])
             
     except Exception as e:
-        print(f"Impossible de lire l'historique pour {home_team} vs {away_team}: {e}")
+        print(f"Erreur stats: {e}")
         
     return round(h_scored, 2), round(h_conceded, 2), round(a_scored, 2), round(a_conceded, 2)
 
@@ -132,7 +126,6 @@ def analyser(req: AnalyseRequest):
         if marge_pct > req.marge_max:
             return {"status": "refused", "message": f"Match rejeté : Marge {marge_pct}%", "marge_match": marge_pct}
 
-        # ⚠️ ON RÉCUPÈRE LA VRAIE FORME DES ÉQUIPES ICI
         hist_h_scored, hist_h_conceded, hist_a_scored, hist_a_conceded = get_real_team_stats(req.home_team, req.away_team)
 
         if model_home is not None and model_meta.get("reliable"):
@@ -141,7 +134,6 @@ def analyser(req: AnalyseRequest):
             xg_away = float(model_away.predict(feats)[0])
         else:
             p_h, p_d, p_a = devig_3way(c1, cx, c2)
-            # On utilise la vraie forme des équipes pour la formule de secours
             xg_home = (hist_h_scored * 0.4) + (hist_a_conceded * 0.3) + (p_h * 2.0)
             xg_away = (hist_a_scored * 0.4) + (hist_h_conceded * 0.3) + (p_a * 2.0)
         
@@ -188,13 +180,16 @@ def analyser(req: AnalyseRequest):
             for k, v in top_probas:
                 value_bets.append({"marche": k, "proba_ia": v["probabilite_ia"], "cote": v["cote"], "edge": v["edge"]})
 
+        # Libération de la mémoire après chaque calcul
+        gc.collect()
+
         return {
             "status": "success",
             "predictions_ia": {
                 "xg_home": round(xg_home, 2), 
                 "xg_away": round(xg_away, 2),
-                "forme_domicile": f"{hist_h_scored} buts marqués / {hist_h_conceded} encaissés (5 derniers)",
-                "forme_exterieur": f"{hist_a_scored} buts marqués / {hist_a_conceded} encaissés (5 derniers)"
+                "forme_domicile": f"{hist_h_scored} buts marqués / {hist_h_conceded} encaissés",
+                "forme_exterieur": f"{hist_a_scored} buts marqués / {hist_a_conceded} encaissés"
             },
             "top_scores_exacts": top_scores,
             "resultats_marches": resultats_marches,
@@ -203,8 +198,10 @@ def analyser(req: AnalyseRequest):
         }
 
     except Exception as e:
+        gc.collect()
         return {"status": "error", "message": str(e), "value_bets": []}
 
+# ... (Le reste des routes /reentrainer, /rapport, /health reste identique à la version 30.0.0) ...
 @app.get("/reentrainer")
 def reentrainer(bt: BackgroundTasks):
     bt.add_task(_pipeline)
@@ -213,51 +210,55 @@ def reentrainer(bt: BackgroundTasks):
 def _pipeline():
     global model_home, model_away, model_meta
     try:
-        dfs = []
+        all_matches = []
         for url in LOVABLE_EXPORTS:
             try:
                 r = requests.get(url, timeout=30)
                 data = r.json()
                 if isinstance(data, dict) and "matches" in data: data = data["matches"]
-                if data and isinstance(data, list): dfs.append(pd.DataFrame(data))
+                if isinstance(data, list): all_matches.extend(data)
             except: pass
                 
-        if not dfs: raise ValueError("Aucune donnée.")
+        if not all_matches: raise ValueError("Aucune donnée.")
         
-        df = pd.concat(dfs, ignore_index=True)
-        if "id" in df.columns: df = df.drop_duplicates(subset=["id"])
-
-        rename = {"hs": "score_home", "as": "score_away", "home": "home_team", "away": "away_team"}
-        df = df.rename(columns={k:v for k,v in rename.items() if k in df.columns})
+        # Dédoublonnage sans pandas
+        seen = set()
+        unique_matches = []
+        for m in all_matches:
+            mid = m.get("id")
+            if mid and mid not in seen:
+                seen.add(mid)
+                unique_matches.append(m)
         
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        df = df.dropna(subset=["date","score_home","score_away"]).sort_values("date").reset_index(drop=True)
+        unique_matches.sort(key=lambda x: x.get("date", ""))
         
         team_history, X_data, y_home, y_away = {}, [], [], []
 
-        for _, row in df.iterrows():
-            h, a, sh, sa = row['home_team'], row['away_team'], row['score_home'], row['score_away']
+        for m in unique_matches:
+            h, a, sh, sa = m.get("home"), m.get("away"), m.get("hs"), m.get("as")
+            if not h or not a or sh is None or sa is None: continue
+            
             hist_h_scored = np.mean([x[0] for x in team_history.get(h, [[2.5, 2.0]])[-5:]])
             hist_h_conceded = np.mean([x[1] for x in team_history.get(h, [[2.5, 2.0]])[-5:]])
             hist_a_scored = np.mean([x[0] for x in team_history.get(a, [[2.0, 2.5]])[-5:]])
             hist_a_conceded = np.mean([x[1] for x in team_history.get(a, [[2.0, 2.5]])[-5:]])
             
-            if pd.notna(row.get('cote_home')) and pd.notna(row.get('cote_away')):
+            if m.get('cote_home') and m.get('cote_away'):
                 try:
-                    marge = 1/row['cote_home'] + 1/row.get('cote_draw', 3.0) + 1/row['cote_away']
-                    X_data.append([float(row['cote_home']), float(row.get('cote_draw', 3.0)), float(row['cote_away']), marge, np.log(float(row['cote_home'])/float(row['cote_away'])), hist_h_scored, hist_h_conceded, hist_a_scored, hist_a_conceded])
+                    marge = 1/m['cote_home'] + 1/m.get('cote_draw', 3.0) + 1/m['cote_away']
+                    X_data.append([float(m['cote_home']), float(m.get('cote_draw', 3.0)), float(m['cote_away']), marge, np.log(float(m['cote_home'])/float(m['cote_away'])), hist_h_scored, hist_h_conceded, hist_a_scored, hist_a_conceded])
                     y_home.append(sh); y_away.append(sa)
                 except: pass
             if h not in team_history: team_history[h] = []
             if a not in team_history: team_history[a] = []
             team_history[h].append([sh, sa]); team_history[a].append([sa, sh])
 
-        if len(X_data) < 50: raise ValueError(f"Pas assez de matchs avec cotes ({len(X_data)}).")
+        if len(X_data) < 50: raise ValueError(f"Pas assez de matchs ({len(X_data)}).")
         X, y_h, y_a = np.array(X_data), np.array(y_home), np.array(y_away)
         split = int(len(X) * 0.8)
         
-        clf_h = xgb.XGBRegressor(n_estimators=150, max_depth=4, learning_rate=0.05, objective='count:poisson')
-        clf_a = xgb.XGBRegressor(n_estimators=150, max_depth=4, learning_rate=0.05, objective='count:poisson')
+        clf_h = xgb.XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, objective='count:poisson', nthread=1) # n_estimators réduit pour la RAM
+        clf_a = xgb.XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.05, objective='count:poisson', nthread=1)
         clf_h.fit(X[:split], y_h[:split]); clf_a.fit(X[:split], y_a[:split])
 
         clf_h.save_model(MODEL_FILE_H); clf_a.save_model(MODEL_FILE_A)
@@ -265,6 +266,8 @@ def _pipeline():
         model_meta = {"reliable": True, "matchs_entrainement": len(X), "date": datetime.utcnow().isoformat()}
         json.dump(model_meta, open(META_FILE, "w"), indent=2)
         json.dump(model_meta, open(REPORT_FILE, "w"), indent=2)
+        
+        gc.collect() # Libération mémoire
     except Exception as e:
         model_meta = {"reliable": False, "reason": str(e)}
         json.dump(model_meta, open(REPORT_FILE, "w"), indent=2)
@@ -275,4 +278,4 @@ def rapport():
 
 @app.api_route("/", methods=["GET", "HEAD"])
 def health():
-    return {"status": "online", "model_ready": model_home is not None}
+    return {"status": "online", "model_ready": model_home is not None

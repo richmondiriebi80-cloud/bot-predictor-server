@@ -1,18 +1,6 @@
-# Outils de compilation (accélère l'installation des packages scientifiques)
-setuptools>=65.0.0
-wheel>=0.40.0
-
-# Serveur web
 fastapi
-uvicorn[standard]
-
-# Data & Machine Learning
-numpy
-pandas
-scikit-learn
-xgboost
-
-# Utilitaires
+uvicorn
 pydantic
 requests
-joblib
+numpy
+xgboost

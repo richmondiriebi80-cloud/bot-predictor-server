@@ -278,4 +278,4 @@ def rapport():
 
 @app.api_route("/", methods=["GET", "HEAD"])
 def health():
-    return {"status": "online", "model_ready": model_home is not None
+    return {"status": "online", "model_ready": model_home is not None}
